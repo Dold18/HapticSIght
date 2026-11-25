@@ -28,7 +28,12 @@ from hapticsight.core.layout import MOTORS, ULTRASONIC_SENSORS
 from hapticsight.core.models import SourceType
 from hapticsight.haptics.patterns import PatternId
 from hapticsight.haptics.scheduler import PulseScheduler
+from hapticsight.hardware.arduino import LinkState
+from hapticsight.hardware.inputs import ManualInput, UltrasonicInput
+from hapticsight.hardware.runtime import HardwareRuntime
+from hapticsight.hardware.telemetry import TelemetryLogger
 from hapticsight.pipeline import HapticSightPipeline, PipelineResult
+from hapticsight.protocol.messages import FirmwareMode
 from hapticsight.simulation.app import (
     FAINT,
     GRID,
@@ -39,7 +44,7 @@ from hapticsight.simulation.app import (
     _font,
     _mix,
 )
-from hapticsight.simulation.manual_ultrasonic import SOURCE_LABEL, ManualMode, ManualUltrasonic
+from hapticsight.simulation.manual_ultrasonic import ManualMode, ManualUltrasonic
 from hapticsight.vision.camera import CameraState
 from hapticsight.vision.config import calibration_to_toml
 from hapticsight.vision.processor import FrameResult, VisionSnapshot, VisionSystem
@@ -57,6 +62,7 @@ GOOD: Color = (110, 220, 140)
 BAD: Color = (240, 90, 90)
 WARN: Color = (240, 190, 70)
 SIM: Color = (235, 110, 220)  # everything simulated is magenta
+REAL: Color = (110, 220, 140)  # real hardware measurements are green
 CAM_COLOR: Color = (120, 160, 255)
 
 STATE_COLORS = {
@@ -72,8 +78,9 @@ STATE_COLORS = {
 
 HELP = (
     "Tab: select camera    F / B: front / rear camera on-off    P: pause inference",
-    "1-4: select simulated sensor S0-S3    Up/Down: range ±10 cm (Shift ±50)",
+    "1-4: select sensor S0-S3    Up/Down: simulated range ±10 cm (Shift ±50)",
     "E: echo / no echo    D: dropout    A: approach 50 cm/s    S: stop motion",
+    "L: stop / resume host commands to the Arduino (link-loss demo)",
     "C: calibration overlay    , .: yaw ∓0.5°    - =: HFOV ∓1°    W: write calibration",
     "K: save screenshot    H: help    Esc / Q: quit",
 )
@@ -84,11 +91,13 @@ class LiveVisionApp:
         self,
         vision: VisionSystem,
         config: HapticSightConfig | None = None,
-        ultrasonic: ManualUltrasonic | None = None,
+        ultrasonic: UltrasonicInput | ManualUltrasonic | None = None,
         detector_label: str = "",
         record_dir: Path | None = None,
         calibration_path: Path = Path("config/cameras.local.toml"),
         fps: int = 30,
+        loop_hz: float = 15.0,
+        logger: TelemetryLogger | None = None,
     ) -> None:
         pygame.init()
         pygame.display.set_caption("HapticSight Live Vision")
@@ -97,8 +106,16 @@ class LiveVisionApp:
         self.config = config or HapticSightConfig()
         self.pipeline = HapticSightPipeline(self.config)
         self.scheduler = PulseScheduler()
-        self.ultrasonic = ultrasonic or ManualUltrasonic()
+        if ultrasonic is None or isinstance(ultrasonic, ManualUltrasonic):
+            ultrasonic = ManualInput(ultrasonic)
+        self.ultrasonic: UltrasonicInput = ultrasonic
         self.clock = MonotonicClock()
+        # The same step function as the headless hardware runtime (no separate logic).
+        self.runtime = HardwareRuntime(
+            ultrasonic, self.pipeline, vision, self.clock, logger, loop_hz=loop_hz
+        )
+        self.loop_hz = loop_hz
+        self._next_step = 0.0
         self.fps = fps
         self.detector_label = detector_label or vision.detector.name
         self.calibration_path = calibration_path
@@ -147,7 +164,7 @@ class LiveVisionApp:
             self.close()
 
     def close(self) -> None:
-        self.vision.stop()
+        self.runtime.close()  # stops vision, switches Arduino motors off, closes the log
         for rec in self._recorders.values():
             rec.close()
         if self._log is not None:
@@ -157,10 +174,10 @@ class LiveVisionApp:
 
     def step(self) -> VisionSnapshot:
         now = self.clock.now()
-        readings = self.ultrasonic.readings(now)
-        cams = self.vision.camera_observations(now)
-        self.result = self.pipeline.process(now, readings, cams)
-        self.scheduler.apply(self.result.frame, now)
+        if self.result is None or now >= self._next_step:  # host loop at loop_hz
+            self._next_step = now + 1.0 / self.loop_hz
+            self.result = self.runtime.step(now).result
+            self.scheduler.apply(self.result.frame, now)
         snap = self.vision.snapshot()
         self.snapshot = snap
         self._record(snap, now)
@@ -189,8 +206,12 @@ class LiveVisionApp:
             r = self.result
             entry = {
                 "t": round(now, 4),
-                "ultrasonic_source": SOURCE_LABEL,
-                "ultrasonic": {k: s.describe() for k, s in self.ultrasonic.sensors.items()},
+                "ultrasonic_source": self.ultrasonic.kind.value,
+                "ultrasonic_simulated": self.ultrasonic.kind.simulated,
+                "ultrasonic": {
+                    spec.sensor_id: self.ultrasonic.display(spec.sensor_id).text
+                    for spec in ULTRASONIC_SENSORS
+                },
                 "haptics": r.frame.pattern_string(),
                 "assessments": [
                     {
@@ -229,28 +250,30 @@ class LiveVisionApp:
         return next((c for c in self.vision.captures if c.camera_id == camera_id), None)
 
     def _on_key(self, key: int, shift: bool) -> None:
-        us = self.ultrasonic.sensors[self.selected_sensor]
+        manual = self.ultrasonic.manual  # only simulated sources accept hand-set ranges
         sensor_keys = {pygame.K_1: "S0", pygame.K_2: "S1", pygame.K_3: "S2", pygame.K_4: "S3"}
+        range_keys = (pygame.K_UP, pygame.K_DOWN, pygame.K_e, pygame.K_d, pygame.K_a, pygame.K_s)
+        if key in range_keys:
+            if manual is None:
+                self.flash("real sensors: ranges cannot be set by hand")
+                return
+            self._manual_key(manual, key, shift)
+            self.ultrasonic.manual_changed()
+            return
         if key in (pygame.K_ESCAPE, pygame.K_q):
             self.running = False
         elif key == pygame.K_h:
             self.show_help = not self.show_help
         elif key in sensor_keys:
             self.selected_sensor = sensor_keys[key]
-        elif key in (pygame.K_UP, pygame.K_DOWN):
-            step = (50 if shift else 10) * (1 if key == pygame.K_UP else -1)
-            us.mode = ManualMode.ECHO
-            us.speed_cm_s = 0.0
-            us.distance_cm = min(us.max_distance_cm, max(us.min_distance_cm, us.distance_cm + step))
-        elif key == pygame.K_e:
-            us.mode = ManualMode.NO_ECHO if us.mode is ManualMode.ECHO else ManualMode.ECHO
-        elif key == pygame.K_d:
-            us.mode = ManualMode.ECHO if us.mode is ManualMode.DROPOUT else ManualMode.DROPOUT
-        elif key == pygame.K_a:
-            us.mode = ManualMode.ECHO
-            us.speed_cm_s = 50.0
-        elif key == pygame.K_s:
-            us.speed_cm_s = 0.0
+        elif key == pygame.K_l:
+            bridge = getattr(self.ultrasonic, "bridge", None)
+            if bridge is None:
+                self.flash("no Arduino link in this mode")
+            else:
+                bridge.commands_enabled = not bridge.commands_enabled
+                state = "resumed" if bridge.commands_enabled else "STOPPED (expect FALLBACK)"
+                self.flash(f"host commands {state}")
         elif key == pygame.K_TAB and self.vision.captures:
             ids = [c.camera_id for c in self.vision.captures]
             self.selected_camera = ids[(ids.index(self.selected_camera) + 1) % len(ids)]
@@ -273,6 +296,28 @@ class LiveVisionApp:
             path.parent.mkdir(exist_ok=True)
             pygame.image.save(self.screen, str(path))
             self.flash(f"saved {path} (local only)")
+
+    def _manual_key(self, manual: ManualUltrasonic, key: int, shift: bool) -> None:
+        us = manual.sensors[self.selected_sensor]
+        if key in (pygame.K_UP, pygame.K_DOWN):
+            step = (50 if shift else 10) * (1 if key == pygame.K_UP else -1)
+            us.mode = ManualMode.ECHO
+            us.speed_cm_s = 0.0
+            us.distance_cm = min(us.max_distance_cm, max(us.min_distance_cm, us.distance_cm + step))
+        elif key == pygame.K_e:
+            us.mode = ManualMode.NO_ECHO if us.mode is ManualMode.ECHO else ManualMode.ECHO
+        elif key == pygame.K_d:
+            us.mode = ManualMode.ECHO if us.mode is ManualMode.DROPOUT else ManualMode.DROPOUT
+        elif key == pygame.K_a:
+            us.mode = ManualMode.ECHO
+            us.speed_cm_s = 50.0
+        elif key == pygame.K_s:
+            us.speed_cm_s = 0.0
+
+    def _source_color(self) -> Color:
+        if self.ultrasonic.title().startswith("ULTRASONIC: DISCONNECTED"):
+            return BAD
+        return SIM if self.ultrasonic.kind.simulated else REAL
 
     def _adjust_calibration(self, key: int) -> None:
         proc = self.vision.processors.get(self.selected_camera)
@@ -363,8 +408,10 @@ class LiveVisionApp:
         proc = self.vision.processors[cid]
         sel = "▶ " if cid == self.selected_camera else ""
         mount = format_bearing(proc.geometry.mount_bearing_deg)
-        name = self.text(f"{sel}{cid} ({mount})", (x, y - 24), TEXT, self.bold)
-        self.text(st.state.value.upper(), (name.right + 10, y - 24), STATE_COLORS[st.state],
+        device = proc.camera.device
+        source = camera_source_label(device)
+        name = self.text(f"{sel}{cid} ({mount}) {source}", (x, y - 28), TEXT, self.bold)
+        self.text(st.state.value.upper(), (name.right + 10, y - 28), STATE_COLORS[st.state],
                   self.bold)  # fmt: skip
         perf_txt = (
             f"cap {st.fps:4.1f} fps | infer {perf.inference_fps:4.1f} fps "
@@ -372,7 +419,7 @@ class LiveVisionApp:
             if perf and perf.processed_frames
             else "no inference yet"
         )
-        self.text(perf_txt, (x + CAM_W, y - 21), DIM, self.small, "topright")
+        self.text(perf_txt, (x + CAM_W, y - 13), DIM, self.small, "topright")
         rect = pygame.Rect(x, y, CAM_W, CAM_H)
         pygame.draw.rect(self.screen, PANEL, rect)
         frame = snap.frames.get(cid)
@@ -470,16 +517,18 @@ class LiveVisionApp:
             for edge in (-half, half):
                 _dashed_line(self.screen, _mix(color, BG, 0.4), pt(center + edge, 20),
                              pt(center + edge, 400), 5, 5)  # fmt: skip
-        # simulated ultrasonic beams + readings (magenta = simulated)
+        # ultrasonic beams + readings (magenta = simulated, green = real hardware)
         beam = self.config.ultrasonic.beam_half_angle_deg
+        us_color = self._source_color()
         for spec in ULTRASONIC_SENSORS:
-            s = self.ultrasonic.sensors[spec.sensor_id]
+            d = self.ultrasonic.display(spec.sensor_id)
             for edge in (-beam, beam):
-                pygame.draw.line(self.screen, _mix(SIM, BG, 0.7), pt(spec.bearing_deg + edge, 20),
+                pygame.draw.line(self.screen, _mix(us_color, BG, 0.7),
+                                 pt(spec.bearing_deg + edge, 20),
                                  pt(spec.bearing_deg + edge, 400))  # fmt: skip
-            if s.mode is ManualMode.ECHO:
-                pts = [pt(spec.bearing_deg + a, s.distance_cm + 20) for a in range(-15, 16, 3)]
-                pygame.draw.lines(self.screen, SIM, False, pts, 3)
+            if d.distance_cm is not None:
+                pts = [pt(spec.bearing_deg + a, d.distance_cm + 20) for a in range(-15, 16, 3)]
+                pygame.draw.lines(self.screen, us_color, False, pts, 3)
         # observations
         if self.result is not None:
             for a in self.result.report.assessments:
@@ -515,21 +564,54 @@ class LiveVisionApp:
     # ------------------------------------------------------------ middle
 
     def _draw_middle(self, x: int, y: int) -> None:
-        self.text(f"ULTRASONIC: {SOURCE_LABEL} (no hardware)", (x, y), SIM, self.bold)
-        y += 22
+        color = self._source_color()
+        head, _, detail = self.ultrasonic.title().partition(" (")
+        self.text(head, (x, y), color, self.bold)
+        if detail:
+            self.text(detail.rstrip(")")[:60], (x, y + 17), color, self.small)
+            y += 14
+        y += 20
+        st = self.ultrasonic.bridge_status()
+        if st is not None:
+            mode = st.firmware_mode
+            mode_txt, mode_color = (
+                {
+                    FirmwareMode.HOST: ("HOST: Arduino follows host commands", REAL),
+                    FirmwareMode.FALLBACK: ("FALLBACK: Arduino drives motors locally", WARN),
+                    FirmwareMode.BOOT: ("BOOT: motors off, waiting for host", DIM),
+                }.get(mode, ("unknown (no status)", BAD))
+                if mode
+                else ("unknown (no status)", BAD)
+            )
+            self.text(f"FIRMWARE {mode_txt}", (x, y), mode_color, self.small)
+            y += 14
+            cmd = "sending" if st.commands_enabled else "STOPPED (L)"
+            ack = st.last_hap_seq_acked if st.last_hap_seq_acked is not None else "-"
+            self.text(f"US {st.us_rate_hz:3.1f} Hz  cmds {cmd}  acked #{ack}  "
+                      f"err {st.decode_errors}/{st.firmware_rx_errors or 0}",
+                      (x, y), DIM, self.small)  # fmt: skip
+            y += 16
+            if st.state is not LinkState.CONNECTED:
+                self.text(st.detail[:58], (x, y), BAD, self.small)
+                y += 14
         for spec in ULTRASONIC_SENSORS:
-            s = self.ultrasonic.sensors[spec.sensor_id]
+            d = self.ultrasonic.display(spec.sensor_id)
             sel = "▶" if spec.sensor_id == self.selected_sensor else " "
-            color = SIM if s.mode is ManualMode.ECHO else DIM
+            dcolor = color if d.status == "echo" else (BAD if d.status == "error" else DIM)
             self.text(f"{sel} {spec.sensor_id} {spec.label:<5}", (x, y), TEXT, self.font)
-            self.text(s.describe(), (x + 120, y), color, self.font)
+            self.text(d.text, (x + 120, y), dcolor, self.font)
             y += 18
         health = {h.sensor_id: h for h in (self.result.sensor_health if self.result else ())}
         degraded = [k for k, h in health.items() if h.status.is_degraded]
         if degraded:
             self.text(f"degraded: {', '.join(degraded)}", (x, y), BAD, self.small)
         y += 22
-        self.text("HAPTIC OUTPUT (virtual motors)", (x, y), (150, 160, 182), self.small)
+        target = (
+            "commands sent to the Arduino"
+            if self.ultrasonic.bridge_status() is not None
+            else "virtual motors only"
+        )
+        self.text(f"HAPTIC OUTPUT ({target})", (x, y), (150, 160, 182), self.small)
         y += 16
         frame = self.result.frame if self.result else None
         if frame is None:
@@ -561,7 +643,13 @@ class LiveVisionApp:
                 src = {SourceType.ULTRASONIC: "US", SourceType.CAMERA: "CAM",
                        SourceType.FUSED: "FUS", SourceType.SIMULATION: "GT"}[a.source]  # fmt: skip
                 rng = format_distance(a.effective_distance_cm)
-                rng_src = "unavailable" if a.effective_distance_cm is None else "SIMULATED"
+                rng_src = (
+                    "unavailable"
+                    if a.effective_distance_cm is None
+                    else "SIMULATED"
+                    if self.ultrasonic.kind.simulated
+                    else "REAL"
+                )
                 tag = a.severity.name if a.is_actionable else "info"
                 label = a.observation.metadata.get("label", "")
                 line = (
@@ -596,8 +684,18 @@ class LiveVisionApp:
             y += 26
             self.text(line, (W // 2, y), TEXT, self.font, "center")
         y += 40
-        self.text("Magenta = simulated ultrasonic data. Camera range is never estimated.",
+        self.text("Magenta = simulated ultrasonic data. Green = real Arduino measurements.",
                   (W // 2, y), SIM, self.font, "center")  # fmt: skip
+        self.text("Camera range is never estimated.", (W // 2, y + 20), DIM, self.font, "center")
+
+
+def camera_source_label(device: object) -> str:
+    """REAL CAMERA / SYNTHETIC / VIDEO FILE, derived from the configured device."""
+    if isinstance(device, int) or (isinstance(device, str) and device.isdigit()):
+        return "REAL CAMERA"
+    if device == "synthetic":
+        return "SYNTHETIC"
+    return "VIDEO FILE"
 
 
 def _wrap(s: str, n: int) -> list[str]:

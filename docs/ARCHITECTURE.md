@@ -12,6 +12,7 @@
                               │
                               ▼
  hapticsight/pipeline.py  HapticSightPipeline.process(now, readings, detections)
+   (live hardware: hardware/runtime.py HardwareRuntime.step -> ArduinoBridge.send)
    ├─ perception/ultrasonic.py  UltrasonicFrontEnd  → sector Observations + SensorHealth
    │                            RangeRateEstimator  → closing speed (or None)
    ├─ perception/buffer.py      ObservationBuffer   → latest camera detections, expiring
@@ -41,6 +42,8 @@ imports from `simulation/` or `pygame`.
 | `protocol/` | serial protocol v1 messages, codec, stream framing, link monitor | stdlib |
 | `hardware/` | device adapter interfaces; host-side Arduino bridge | core, haptics, protocol |
 | `vision/` | camera capture, YOLOX detection, tracking, bearing geometry, live app, replay, CLI | core, pipeline (numpy, OpenCV, ONNX Runtime) |
+| `hardware/` (M3) | pyserial transport, ArduinoBridge state machine, virtual Uno, labelled inputs, HardwareRuntime, telemetry, `hapticsight-hw` | protocol, pipeline (pyserial) |
+| `firmware/arduino_uno/` | Uno firmware: portable C++ core in `src/`, pin/ISR glue in the `.ino` | none (C++11, avr-libc) |
 | `config.py` | aggregates per-layer config dataclasses; TOML overrides | all layer configs |
 | `pipeline.py` | the one shared processing chain | perception, risk, haptics |
 | `simulation/` | world, simulated sensors, scenarios, headless engine, CLI, Pygame app | everything above |
@@ -95,6 +98,13 @@ A future hardware runtime is then a loop: `bridge.poll()` + `camera.poll()` →
 | D20 | **Explicit per-detection bearing-uncertainty budget** (yaw, FOV, distortion, box). | Calibration quality flows honestly into motor spreading; uncalibrated cameras are visibly uncertain. |
 | D21 | **Fused confidence = min(camera, ultrasonic)**; weak or stale camera detections are never fused; echoes are suppressed only by confident fusion (validated config invariant). | Fixes the PR #1 finding; a bad association can never remove an independent ultrasonic warning. |
 | D22 | **Camera-only advisory cue is experimental and off by default** (slot 8, lowest rank, ≤ 1 channel). | Explores unranged awareness without implying distance or danger. |
+| D23 | **Firmware = portable core + thin glue.** All behaviour in hardware-independent C++11 (`src/`); the `.ino` only does pins, ISRs, Serial, shift register. | Unit-testable natively with injected clocks/HAL; the same code runs in the virtual Uno. |
+| D24 | **Staggered ultrasonic slots of 50 ms (5 Hz per sensor)**, echo edges time-stamped by pin-change interrupts, bounded state machine. | Cross-talk resistance over an arbitrary 10 Hz target; never blocks serial or motor timing. Host staleness/rate windows adjusted to 5 Hz. |
+| D25 | **Host is silent until a version-checked `$HLO`**; DTR reset if none; input flushed *before* (never after) a reset. | Uno auto-reset + bootloader; telemetry alone does not prove compatibility; avoids losing the fresh `$HLO`. |
+| D26 | **Firmware commits a command only after the entire line validates**; malformed lines never refresh the watchdog. | No partial updates; a garbled stream cannot keep stale commands alive. |
+| D27 | **Fallback: one DEGRADED burst, then cardinal-motor warnings; missing/faulty/stale sensor = DEGRADED.** | Absence of data is never rendered as "clear"; wearer is told the system degraded. |
+| D28 | **Source kind fixed by class** (real Arduino / virtual Arduino / manual) and propagated to UI colours, labels, logs. | A demo cannot present simulated distances as real measurements. |
+| D29 | **Virtual Uno over a pty** runs the real firmware logic against the real pyserial path. | End-to-end host↔firmware testing in CI and demos before hardware exists (sensors simulated, clearly labelled). |
 
 ## 5. Determinism and timing
 

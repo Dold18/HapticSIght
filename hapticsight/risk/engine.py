@@ -76,7 +76,7 @@ class RiskConfig:
     ttc_warning_s: float = 2.0
     ttc_caution_s: float = 3.0
     min_confidence: float = 0.35
-    stale_after_s: float = 0.5
+    stale_after_s: float = 0.6
     expire_after_s: float = 2.0
     forward_path_half_angle_deg: float = 30.0
     conservative_distance: bool = True

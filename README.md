@@ -28,6 +28,7 @@ same pipeline.
 - [Controls](#controls)
 - [Predefined scenarios](#predefined-scenarios)
 - [Computer vision](#computer-vision)
+- [Arduino firmware and hardware runtime](#arduino-firmware-and-hardware-runtime)
 - [Testing](#testing)
 - [Hardware integration plan](#hardware-integration-plan)
 - [Limitations](#limitations)
@@ -35,8 +36,9 @@ same pipeline.
 
 ## Project status
 
-**Milestone 1** (software foundation and simulator) is merged. **Milestone 2** (dual-camera
-computer vision) is on `feature/dual-camera-computer-vision`.
+**Milestones 1** (software foundation and simulator) **and 2** (dual-camera computer vision) are
+merged. **Milestone 3** (Arduino firmware and end-to-end serial integration) is on
+`feature/arduino-firmware-serial-integration`.
 
 | Area | Status |
 |------|--------|
@@ -46,14 +48,15 @@ computer vision) is on `feature/dual-camera-computer-vision`.
 | Deterministic, explainable risk engine | ✅ Implemented and tested |
 | Haptic encoder: 8 channels, pulse patterns, conflict resolution, hysteresis | ✅ Implemented and tested |
 | Interactive Pygame simulator with 10 deterministic scenarios | ✅ Implemented, regression-tested headless |
-| Serial protocol v1 (host side): codec, framing, link monitor, Arduino bridge | ✅ Implemented and tested with a fake transport |
-| Arduino firmware | ⏳ Planned. Specified in [PROTOCOL.md](docs/PROTOCOL.md), **not implemented** |
+| Serial protocol v1: host codec, pyserial transport, handshake/reconnect state machine | ✅ Implemented; tested against the firmware logic over a pseudo-terminal |
+| Arduino Uno firmware: staggered HC-SR04 ranging, 8-channel pulses, watchdog, fallback | ✅ Compiles (9.3 KB flash, 884 B SRAM), 312 native checks, host parity tests. **Not yet run on a physical Arduino** |
+| Unified hardware runtime + `hapticsight-hw` diagnostics (serial, sensors, motors, link loss) | ✅ Implemented; exercised with the virtual Uno only |
 | Dual-camera capture (concurrent, bounded latency, reconnection) | ✅ Implemented; run with two real cameras on the dev Mac (not yet the vest webcams) |
 | Object detection: YOLOX-Tiny (Apache-2.0), ONNX Runtime + CoreML | ✅ Implemented and benchmarked on the M1 |
 | Multi-object tracking, pixel→bearing localisation, calibration | ✅ Implemented and tested |
 | Live vision diagnostic app, recording, deterministic replay | ✅ Implemented (ultrasonic values **simulated** in demos) |
 | Camera-only advisory cue | 🧪 Experimental, off by default |
-| Integration with physical sensors, motors, vest | ⏳ Planned. **Not validated** |
+| Physical sensors, motors, electrical design, vest integration | ⏳ **Not validated**: hardware not yet assembled; see [HARDWARE_BRINGUP.md](docs/HARDWARE_BRINGUP.md) |
 
 ## Hardware overview
 
@@ -85,7 +88,7 @@ ultrasonic readings ─┐
                      ├─► perception ─► risk engine ─► haptic encoder ─► 8 motor patterns
 camera detections ───┘  (fusion)      (explainable)   (timing-coded)      │
                                                                          ▼
-                                              PulseScheduler (sim) / Arduino firmware (future)
+                              PulseScheduler (sim) / Arduino Uno firmware via USB serial
 ```
 
 ```
@@ -95,7 +98,9 @@ hapticsight/
   risk/         distance bands, motion, time-to-contact, prioritisation
   haptics/      bearing→motor mapping, pulse patterns, encoder, scheduler
   protocol/     serial protocol v1: messages, codec, framing, link monitor
-  hardware/     device interfaces + host-side Arduino bridge
+  hardware/     Arduino bridge, pyserial transport, virtual Uno, runtime, hapticsight-hw CLI
+firmware/
+  arduino_uno/  Arduino Uno firmware (C++), native tests, virtual-Uno harness
   vision/       capture, YOLOX detector, bearing geometry, tracker, live app, replay, CLI
   simulation/   world, simulated sensors, scenarios, engine, CLI, Pygame app
   pipeline.py   the single shared processing chain
@@ -141,7 +146,7 @@ git clone https://github.com/Dold18/HapticSIght.git
 cd HapticSIght
 python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"        # everything; or ".[sim]" (simulator) / ".[vision]" (cameras)
+pip install -e ".[dev]"        # everything; or ".[sim]" / ".[vision]" / ".[hardware]" (pyserial)
 
 # Computer vision only: download the detector once (20 MB, Apache-2.0, checksum-verified)
 hapticsight-vision download-model yolox_tiny
@@ -264,6 +269,45 @@ cores and under 300 MB RSS. The live UI rendered at ~28 fps. Full tables, the mo
 the calibration procedure, and what a COCO detector **cannot** see (walls, poles, curbs, glass,
 stairs) are in [docs/COMPUTER_VISION.md](docs/COMPUTER_VISION.md).
 
+## Arduino firmware and hardware runtime
+
+![Live runtime against the virtual Arduino](docs/images/live-hardware-virtual.png)
+
+*Unified runtime running against the **virtual Arduino**: the real firmware logic compiled
+natively with **simulated** sensors, reached through the real serial stack over a pseudo-terminal.
+The cameras here are synthetic. Firmware is in HOST mode at 5 Hz with commands acknowledged; S3
+reports a sensor error, so M6 plays DEGRADED. Magenta marks simulated data; real Arduino
+measurements are shown in green.*
+
+The Arduino Uno firmware ([docs/FIRMWARE.md](docs/FIRMWARE.md)) fires the four HC-SR04s one at a
+time (50 ms slots, **5 Hz per sensor**, calculated from that slot timing) with interrupt-timed
+echoes. It plays the eight motor patterns through the 74HC595, expires every host command after
+its TTL, and then falls back to ultrasonic-only warnings on M0/M2/M4/M6. Missing or faulty sensors
+are signalled as DEGRADED, never as clear.
+
+```bash
+# flash (see docs/FIRMWARE.md; pins are PROVISIONAL, see docs/HARDWARE_INTERFACE.md §3a)
+arduino-cli compile --fqbn arduino:avr:uno firmware/arduino_uno
+arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn arduino:avr:uno firmware/arduino_uno
+
+hapticsight-hw ports                                    # find the board
+hapticsight-hw monitor    --port /dev/cu.usbmodemXXXX   # raw + decoded serial, link health
+hapticsight-hw ultrasonic --port /dev/cu.usbmodemXXXX   # distances, statuses, rates, history
+hapticsight-hw motor-test --port /dev/cu.usbmodemXXXX --motor 2 --pattern CAUTION --seconds 2 --yes
+hapticsight-hw link-loss  --port /dev/cu.usbmodemXXXX   # HOST -> FALLBACK -> HOST demonstration
+hapticsight-hw run        --port /dev/cu.usbmodemXXXX --front 0 --rear 1 --log recordings/run
+
+# the same commands without hardware: real firmware logic + SIMULATED sensors
+hapticsight-hw run --port virtual --virtual-ranges "S0=90,S2=180" --front synthetic --rear synthetic --model synthetic
+```
+
+Safety defaults: nothing drives a motor unless asked, `motor-test` needs `--yes`, drives one
+motor, and stops after at most 10 s, and closing the link sends an all-OFF command. The UI and
+logs label ultrasonic data as **REAL**, **SIMULATED (virtual Arduino)**, **SIMULATED (manual)**
+or **DISCONNECTED**, based on the source's type rather than on text you supply. Before connecting
+motors, work through [docs/HARDWARE_BRINGUP.md](docs/HARDWARE_BRINGUP.md); motor voltage, current,
+driver drop, and output-enable behaviour are **unverified**.
+
 ## Testing
 
 ```bash
@@ -275,18 +319,22 @@ mypy
 GUI tests use SDL's dummy video driver, so the suite runs without a display. Vision tests use
 fake cameras, scripted detectors, and procedurally generated synthetic video, so they need **no
 webcam and no model download**. Two optional tests exercise the real YOLOX model and are skipped
-when it is not installed. GitHub Actions runs lint, type checks, and tests on every push and pull request
+when it is not installed. Firmware tests compile the firmware's C++ logic natively (needs only a
+C++ compiler): 312 unit checks, parity of parser, timing, and modes with the Python host, and host
+↔ virtual-Uno integration over a pseudo-terminal. No Arduino is needed.
+`make -C firmware/arduino_uno test` runs the C++ checks alone. GitHub Actions runs lint, type
+checks, tests, and an `arduino-cli` compile for the Uno on every push and pull request
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Hardware integration plan
 
-1. **Arduino firmware** implementing [protocol v1](docs/PROTOCOL.md): sequential HC-SR04 ranging,
-   `$US`/`$ST` reporting, `$HAP` execution with TTL, built-in pattern table, and the
-   ultrasonic-only fallback mode.
-2. **Serial transport**: a `pyserial`-backed `ByteTransport` for `ArduinoBridge`, plus a
-   hardware-in-the-loop runtime (`poll → pipeline.process → send` at 10–20 Hz).
-3. **Bench validation**: measured beam width, range noise, and latency on the real sensors;
-   tune `UltrasonicConfig` and pattern timings with the actual motors.
+1. **Arduino firmware** ✅ (Milestone 3, software only): protocol v1, staggered ranging,
+   pulse scheduling, watchdog, ultrasonic-only fallback.
+2. **Serial transport and runtime** ✅ (Milestone 3): pyserial transport, handshake and
+   reconnection, unified runtime at 15 Hz, diagnostics, telemetry.
+3. **Bench validation** (next): follow [HARDWARE_BRINGUP.md](docs/HARDWARE_BRINGUP.md). Confirm the
+   pin map; verify the electrical items; measure real sensor rate, noise, and cross-talk; check
+   motor voltage and current; then tune `UltrasonicConfig` and pattern timings.
 4. **Cameras** ✅ (Milestone 2): concurrent capture, YOLOX detection, tracking, calibrated
    bearings. Remaining: verify with the vest-mounted USB webcams and calibrate them in place.
 5. **Wearable trials**: perceptual tuning of patterns (distinguishability, fatigue) in controlled,
@@ -294,8 +342,12 @@ when it is not installed. GitHub Actions runs lint, type checks, and tests on ev
 
 ## Limitations
 
-* **No hardware validation.** All behaviour shown is simulated; sensor models are simplified
-  (no multipath, specular reflection, cross-talk, or occlusion between obstacles).
+* **No hardware validation.** The firmware compiles and its logic is tested, but it has not run
+  on a physical Arduino; sensors, motors, and the electrical design are untested. Simulator and
+  virtual-Uno sensor models are simplified (no multipath, specular reflection, cross-talk, or
+  occlusion between obstacles).
+* **Provisional pins and timing.** The Uno pin map awaits CAD/electronics confirmation. The 5 Hz
+  per-sensor rate is calculated from slot timing, not yet measured on real HC-SR04s.
 * **Four ultrasonic sectors.** Blind zones exist around the diagonals; diagonal motors are driven
   only when camera bearings are fused with an echo (or in ground-truth mode).
 * **Camera-only objects are not haptically signalled.** Without a measured range they get no
@@ -322,6 +374,8 @@ when it is not installed. GitHub Actions runs lint, type checks, and tests on ev
 | [docs/COMPUTER_VISION.md](docs/COMPUTER_VISION.md) | Capture, detector choice + benchmarks, tracking, bearing geometry, calibration, limitations |
 | [docs/HARDWARE_INTERFACE.md](docs/HARDWARE_INTERFACE.md) | Sensor/motor numbering, coordinates, HW/SW boundary |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | Serial protocol v1 specification |
+| [docs/FIRMWARE.md](docs/FIRMWARE.md) | Arduino firmware design, build/flash, memory, tests, troubleshooting |
+| [docs/HARDWARE_BRINGUP.md](docs/HARDWARE_BRINGUP.md) | Electrical rules, verification items, step-by-step bench checklist |
 | [docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md) | Milestone status, decisions, test results, next steps |
 | [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) | Dependency and model licences |
 | [CLAUDE.md](CLAUDE.md) | Conventions and instructions for coding agents |

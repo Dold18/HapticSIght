@@ -266,4 +266,5 @@ def test_live_app_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
         app.close()
     session = next((tmp_path / "rec").iterdir())
     log = [json.loads(x) for x in (session / "session.jsonl").read_text().splitlines()]
-    assert log and all(e["ultrasonic_source"] == "SIMULATED" for e in log)
+    assert log and all(e["ultrasonic_source"] == "simulated-manual" for e in log)
+    assert all(e["ultrasonic_simulated"] is True for e in log)

@@ -227,13 +227,16 @@ def test_stale_hazard_does_not_keep_warning_after_hold() -> None:
     engine = RiskEngine()
     enc = HapticEncoder(HapticConfig(release_hold_s=0.35))
     obs = make_obs(0, 30, t=0.0)
+    stale = engine.config.stale_after_s
     assert enc.encode(engine.assess([obs], 0.0), 0.0).pattern_ids[0] is PatternId.CRITICAL
-    # Not refreshed, but still within stale_after_s = 0.5: still a live warning.
-    assert enc.encode(engine.assess([obs], 0.5), 0.5).pattern_ids[0] is PatternId.CRITICAL
+    # Not refreshed, but still within stale_after_s: still a live warning.
+    assert enc.encode(engine.assess([obs], stale), stale).pattern_ids[0] is PatternId.CRITICAL
     # Now stale: the risk engine rates it NONE; the encoder only holds briefly.
-    held = enc.encode(engine.assess([obs], 0.6), 0.6).channels[0]
+    t1 = stale + 0.1
+    held = enc.encode(engine.assess([obs], t1), t1).channels[0]
     assert held.pattern_id is PatternId.CRITICAL and held.held
-    assert enc.encode(engine.assess([obs], 0.9), 0.9).pattern_ids[0] is PatternId.OFF
+    t2 = stale + 0.4
+    assert enc.encode(engine.assess([obs], t2), t2).pattern_ids[0] is PatternId.OFF
 
 
 def test_low_confidence_does_not_drive_motor() -> None:

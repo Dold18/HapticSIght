@@ -19,6 +19,8 @@ from hapticsight.protocol.messages import (
 class DecodeResult:
     messages: list[Message] = field(default_factory=list)
     errors: list[ProtocolError] = field(default_factory=list)
+    # Every complete line in arrival order with its outcome (for monitors/logs).
+    lines: list[tuple[bytes, Message | ProtocolError]] = field(default_factory=list)
 
 
 class StreamDecoder:
@@ -42,19 +44,26 @@ class StreamDecoder:
                 if self._discarding:
                     self._discarding = False
                 elif self._buf.strip():
+                    raw = bytes(self._buf)
                     try:
-                        result.messages.append(decode(bytes(self._buf)))
+                        msg = decode(raw)
                     except ProtocolError as exc:
                         result.errors.append(exc)
+                        result.lines.append((raw, exc))
+                    else:
+                        result.messages.append(msg)
+                        result.lines.append((raw, msg))
                 self._buf.clear()
                 continue
             if self._discarding:
                 continue
             self._buf.append(b)
             if len(self._buf) >= MAX_LINE_BYTES:
+                overflow = FramingError("line overflow; resynchronising")
+                result.lines.append((bytes(self._buf[:16]) + b"...", overflow))
                 self._buf.clear()
                 self._discarding = True
-                result.errors.append(FramingError("line overflow; resynchronising"))
+                result.errors.append(overflow)
         return result
 
 
@@ -66,7 +75,7 @@ class LinkMonitor:
     *valid* message. Times are host monotonic seconds.
     """
 
-    def __init__(self, timeout_s: float = 0.5) -> None:
+    def __init__(self, timeout_s: float = 0.75) -> None:
         self.timeout_s = timeout_s
         self.last_rx: float | None = None
         self.firmware_mode: FirmwareMode | None = None
@@ -84,6 +93,10 @@ class LinkMonitor:
             self._last_us_seq = msg.seq
         elif isinstance(msg, StatusMessage):
             self.firmware_mode = msg.mode
+
+    def restart_sequence(self) -> None:
+        """Forget the last US sequence number (after a board reset or new session)."""
+        self._last_us_seq = None
 
     def on_error(self) -> None:
         self.decode_errors += 1

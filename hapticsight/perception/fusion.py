@@ -42,7 +42,7 @@ from hapticsight.core.models import Observation, RangeStatus, SourceType
 class FusionConfig:
     enabled: bool = True
     association_margin_deg: float = 10.0
-    max_ultrasonic_age_s: float = 0.4
+    max_ultrasonic_age_s: float = 0.45  # one 200 ms sensor period + lost frame + latency
     max_camera_age_s: float = 0.4
     # Must be >= RiskConfig.min_confidence (validated by HapticSightConfig) so an
     # accepted fused observation is always actionable when its echo would be.

@@ -28,5 +28,33 @@ jobs:
           ruff format --check .
       - name: Type check
         run: mypy
-      - name: Test
+      - name: Test (includes native firmware tests and the virtual Uno over a pty)
         run: pytest
+
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native firmware unit tests (ASan/UBSan)
+        run: make -C firmware/arduino_uno test
+      - name: Install arduino-cli
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=$HOME/bin sh
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+      - name: Install AVR core
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:avr
+      - name: Compile for Arduino Uno
+        run: |
+          arduino-cli compile --fqbn arduino:avr:uno --warnings all firmware/arduino_uno 2>&1 | tee build.log
+          # fail if global SRAM use exceeds 75 % (leave room for the stack on a 2 KB part)
+          python3 - <<'EOF'
+          import re
+          log = open("build.log").read()
+          flash = re.search(r"Sketch uses (\d+) bytes \((\d+)%\)", log)
+          ram = re.search(r"Global variables use (\d+) bytes \((\d+)%\)", log)
+          print(f"flash {flash.group(1)} B ({flash.group(2)}%), SRAM {ram.group(1)} B ({ram.group(2)}%)")
+          assert int(ram.group(2)) <= 75, "SRAM budget exceeded"
+          EOF

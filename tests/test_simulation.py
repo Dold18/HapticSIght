@@ -120,7 +120,7 @@ def test_ultrasonic_sampling_rate() -> None:
     arr = make_array()
     w = World()
     emitted = sum(bool(arr.sample(w, i * 0.02)) for i in range(50))  # 1 s at 50 Hz
-    assert emitted == 10
+    assert emitted == 5  # default matches the firmware: 4 sensors x 50 ms slots = 5 Hz
 
 
 def test_camera_reports_bearing_only_within_fov() -> None:
