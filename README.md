@@ -5,8 +5,10 @@ directional vibration around the torso.**
 
 HapticSight detects obstacles around a person and communicates *direction*, *proximity*, and
 *urgency* through eight vibration motors placed at 45° intervals around a vest. This repository
-holds the software: a modular Python pipeline (perception → risk assessment → haptic encoding)
-and an interactive simulator that runs the same pipeline with no hardware attached.
+holds the software: a modular Python pipeline (perception → risk assessment → haptic encoding),
+an interactive simulator that runs the same pipeline with no hardware attached, and real-time
+dual-camera computer vision (object detection, tracking, and bearing estimation) that feeds that
+same pipeline.
 
 > ⚠️ **Safety disclaimer.** HapticSight is an experimental engineering prototype. It is **not** a
 > validated mobility aid, medical device, or collision-avoidance system, and must not be relied on
@@ -25,6 +27,7 @@ and an interactive simulator that runs the same pipeline with no hardware attach
 - [Running the simulator](#running-the-simulator)
 - [Controls](#controls)
 - [Predefined scenarios](#predefined-scenarios)
+- [Computer vision](#computer-vision)
 - [Testing](#testing)
 - [Hardware integration plan](#hardware-integration-plan)
 - [Limitations](#limitations)
@@ -32,19 +35,24 @@ and an interactive simulator that runs the same pipeline with no hardware attach
 
 ## Project status
 
-**Milestone 1: software foundation and interactive simulator** (this branch).
+**Milestone 1** (software foundation and simulator) is merged. **Milestone 2** (dual-camera
+computer vision) is on `feature/dual-camera-computer-vision`.
 
 | Area | Status |
 |------|--------|
 | Shared data model, body-frame geometry, hardware layout contract | ✅ Implemented and tested |
 | Ultrasonic interpretation, closing-speed estimation, sensor health | ✅ Implemented and tested |
-| Camera/ultrasonic fusion (gating-based foundation) | ✅ Implemented and tested |
+| Camera/ultrasonic fusion (gating, conservative confidence) | ✅ Implemented and tested (confidence fix in M2) |
 | Deterministic, explainable risk engine | ✅ Implemented and tested |
 | Haptic encoder: 8 channels, pulse patterns, conflict resolution, hysteresis | ✅ Implemented and tested |
 | Interactive Pygame simulator with 10 deterministic scenarios | ✅ Implemented, regression-tested headless |
 | Serial protocol v1 (host side): codec, framing, link monitor, Arduino bridge | ✅ Implemented and tested with a fake transport |
 | Arduino firmware | ⏳ Planned. Specified in [PROTOCOL.md](docs/PROTOCOL.md), **not implemented** |
-| Webcam capture and object detection | ⏳ Planned. Interface only |
+| Dual-camera capture (concurrent, bounded latency, reconnection) | ✅ Implemented; run with two real cameras on the dev Mac (not yet the vest webcams) |
+| Object detection: YOLOX-Tiny (Apache-2.0), ONNX Runtime + CoreML | ✅ Implemented and benchmarked on the M1 |
+| Multi-object tracking, pixel→bearing localisation, calibration | ✅ Implemented and tested |
+| Live vision diagnostic app, recording, deterministic replay | ✅ Implemented (ultrasonic values **simulated** in demos) |
+| Camera-only advisory cue | 🧪 Experimental, off by default |
 | Integration with physical sensors, motors, vest | ⏳ Planned. **Not validated** |
 
 ## Hardware overview
@@ -88,6 +96,7 @@ hapticsight/
   haptics/      bearing→motor mapping, pulse patterns, encoder, scheduler
   protocol/     serial protocol v1: messages, codec, framing, link monitor
   hardware/     device interfaces + host-side Arduino bridge
+  vision/       capture, YOLOX detector, bearing geometry, tracker, live app, replay, CLI
   simulation/   world, simulated sensors, scenarios, engine, CLI, Pygame app
   pipeline.py   the single shared processing chain
   config.py     configuration aggregate + TOML overrides
@@ -101,9 +110,10 @@ design-decision log.
 
 1. **Perception.** Each ultrasonic echo becomes an observation at the sensor's bearing, with
    ±15° bearing uncertainty (the beam width). Closing speed is estimated from range history and
-   is *unknown* until there is enough evidence. Camera detections carry a bearing only, no range.
-   When a camera detection lines up with a fresh echo they are fused: camera bearing plus
-   ultrasonic range.
+   is *unknown* until there is enough evidence. Camera detections (tracked YOLOX detections)
+   carry a bearing and its uncertainty, but no range. When a fresh, confident camera track lines
+   up with a fresh echo they are fused: camera bearing plus ultrasonic range, with the *lower* of
+   the two confidences. A weak camera detection is never fused and never hides an echo.
 2. **Risk.** Default bands: **< 50 cm critical**, **50–100 cm warning**, **100–200 cm caution**,
    **> 200 cm none** (configurable). A measured approach can raise severity through
    time-to-contact. Stale (> 0.5 s) or low-confidence (< 0.35) observations are shown but never
@@ -117,21 +127,28 @@ design-decision log.
    | Warning | 2 Hz single tap (30 %) | 2 Hz double tap |
    | Critical | 4 Hz near-continuous (72 %) | 4 Hz double tap (80 %) |
    | Degraded sensor | sparse triple blip every 2 s | — |
+   | Advisory (experimental, off by default) | one 40 ms tick every 3 s for a seen-but-unranged object ahead | — |
 
    Escalation is immediate; stepping down waits 0.35 s, which prevents flicker.
 
 ## Installation
 
 Requires **Python 3.11+** (macOS ships 3.9, so install a newer one, e.g. `brew install python@3.11`).
-No Arduino, camera, GPU, or network service is needed.
+The simulator needs no Arduino, camera, GPU, or network service.
 
 ```bash
 git clone https://github.com/Dold18/HapticSIght.git
 cd HapticSIght
 python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -e ".[dev]"        # or ".[sim]" for just the simulator
+pip install -e ".[dev]"        # everything; or ".[sim]" (simulator) / ".[vision]" (cameras)
+
+# Computer vision only: download the detector once (20 MB, Apache-2.0, checksum-verified)
+hapticsight-vision download-model yolox_tiny
 ```
+
+macOS camera access: grant camera permission to the app you launch Python from (Terminal,
+iTerm, or VS Code) under *System Settings → Privacy & Security → Camera*.
 
 ## Running the simulator
 
@@ -208,6 +225,45 @@ outcome listed here (`tests/test_scenarios.py`).
 | 9 | Obstacle drifting across 359°/0° | Only M0 driven throughout; bearing wraps cleanly |
 | 10 | Conflicting / uncertain observations | Unranged camera-only object gets no band; low-confidence ghost ignored; intermittent echo smoothed |
 
+## Computer vision
+
+![Live vision app with synthetic camera sources](docs/images/live-vision-synthetic.png)
+
+*Live vision app running on synthetic test scenes. Boxes show stable track IDs and body-relative
+bearings ± uncertainty. Front tracks are fused with a **simulated** 90 cm S0 echo (magenta) and
+drive M7/M0/M1; rear tracks have no range, so they are listed but do not vibrate. S3 is set to
+dropout, so M6 shows the degraded cue.*
+
+```bash
+hapticsight-vision cameras                       # list/probe cameras, negotiated modes, permission hints
+hapticsight-vision live --front 0 --rear 1 --ultrasonic "S0=90"   # real webcams + SIMULATED ranges
+hapticsight-vision live --front synthetic --rear synthetic --model synthetic   # no camera, no model
+hapticsight-vision live --front 0 --rear off     # one camera only
+hapticsight-vision live --record recordings      # also record raw video + session log (local only)
+hapticsight-vision record --front 0 --rear 1 --seconds 20
+hapticsight-vision replay --front recordings/.../CAM_FRONT.mp4 --ultrasonic "S0=80" \
+    --export out.jsonl --annotate annotated/      # deterministic, frame-by-frame
+hapticsight-vision benchmark --system --front 0 --rear 1 --seconds 20
+hapticsight-vision calibrate --camera CAM_FRONT --image-width 1280 --point 212:-25 --point 641:0 --point 1069:25 --write
+```
+
+Camera sources accept a device index, a video file, `synthetic`, or `off`. Camera assignment,
+resolution, and calibration live in `config/cameras.local.toml` (git-ignored, auto-loaded); see
+`config/vision.example.toml`. Nothing about the webcams is hard-coded: until calibrated, a
+nominal 60° FOV is used with a large, explicit bearing uncertainty.
+
+Live app keys: `Tab` select camera · `F`/`B` front/rear camera on-off · `1–4` select simulated
+sensor · `↑/↓` range · `E` echo/no echo · `D` dropout · `A` approach · `C` calibration overlay
+(`,` `.` yaw, `-` `=` FOV, `W` write) · `P` pause inference · `K` screenshot · `H` help.
+
+**Measured on the MacBook Air M1** (two real cameras: the built-in FaceTime camera and an iPhone
+Continuity Camera standing in for the not-yet-connected USB webcams; YOLOX-Tiny via CoreML,
+15 fps inference cap): both cameras captured at 30 fps and inference held 15 fps per camera at
+~10 ms per frame, with 20–30 ms mean capture→observation latency (p95 ≤ 33 ms), using 1.7 CPU
+cores and under 300 MB RSS. The live UI rendered at ~28 fps. Full tables, the model comparison,
+the calibration procedure, and what a COCO detector **cannot** see (walls, poles, curbs, glass,
+stairs) are in [docs/COMPUTER_VISION.md](docs/COMPUTER_VISION.md).
+
 ## Testing
 
 ```bash
@@ -216,8 +272,10 @@ ruff check . && ruff format --check .
 mypy
 ```
 
-GUI tests use SDL's dummy video driver, so the suite runs without a display. GitHub Actions runs
-lint, type checks, and tests on every push and pull request
+GUI tests use SDL's dummy video driver, so the suite runs without a display. Vision tests use
+fake cameras, scripted detectors, and procedurally generated synthetic video, so they need **no
+webcam and no model download**. Two optional tests exercise the real YOLOX model and are skipped
+when it is not installed. GitHub Actions runs lint, type checks, and tests on every push and pull request
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Hardware integration plan
@@ -229,8 +287,8 @@ lint, type checks, and tests on every push and pull request
    hardware-in-the-loop runtime (`poll → pipeline.process → send` at 10–20 Hz).
 3. **Bench validation**: measured beam width, range noise, and latency on the real sensors;
    tune `UltrasonicConfig` and pattern timings with the actual motors.
-4. **Cameras**: capture plus a lightweight detector on the M1 CPU, implementing `CameraDetector`
-   with calibrated bearing per pixel column.
+4. **Cameras** ✅ (Milestone 2): concurrent capture, YOLOX detection, tracking, calibrated
+   bearings. Remaining: verify with the vest-mounted USB webcams and calibrate them in place.
 5. **Wearable trials**: perceptual tuning of patterns (distinguishability, fatigue) in controlled,
    supervised settings.
 
@@ -244,6 +302,13 @@ lint, type checks, and tests on every push and pull request
   distance band. This is deliberate (no fabricated range), but it means a soft or absorbent obstacle
   seen only by the camera produces no vibration.
 * **Fusion is a simple gate.** Ambiguous associations are resolved conservatively and flagged.
+* **Computer vision sees COCO objects only.** People, vehicles, bicycles, furniture, and animals
+  are detected; walls, poles, posts, curbs, stairs, glass, and holes are not. Ultrasonic ranging
+  remains the primary obstacle sensor.
+* **Camera bearings depend on calibration.** Uncalibrated, a wrong FOV guess can shift edge
+  bearings by 5–15°, enough to change motor sectors; see the calibration procedure.
+* **The vest webcams are untested.** Real-camera results so far come from the Mac's built-in
+  camera and an iPhone Continuity Camera.
 * **Stationary-wearer simulation.** Obstacles move relative to a stationary wearer; wearer walking
   is equivalent for range-rate purposes but is not modelled explicitly.
 * **Provisional parameters.** Thresholds, beam width, and pulse timings are starting points that
@@ -254,7 +319,9 @@ lint, type checks, and tests on every push and pull request
 | Document | Purpose |
 |----------|---------|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Data flow, interfaces, design-decision log |
+| [docs/COMPUTER_VISION.md](docs/COMPUTER_VISION.md) | Capture, detector choice + benchmarks, tracking, bearing geometry, calibration, limitations |
 | [docs/HARDWARE_INTERFACE.md](docs/HARDWARE_INTERFACE.md) | Sensor/motor numbering, coordinates, HW/SW boundary |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | Serial protocol v1 specification |
 | [docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md) | Milestone status, decisions, test results, next steps |
+| [docs/THIRD_PARTY.md](docs/THIRD_PARTY.md) | Dependency and model licences |
 | [CLAUDE.md](CLAUDE.md) | Conventions and instructions for coding agents |

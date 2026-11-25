@@ -14,10 +14,21 @@ dependencies = []
 [project.optional-dependencies]
 # The interactive simulator is the only component that needs a graphics library.
 sim = ["pygame-ce>=2.4"]
-dev = ["pygame-ce>=2.4", "pytest>=8", "ruff>=0.6", "mypy>=1.10"]
+# Computer vision (Milestone 2). OpenCV headless avoids a Qt/SDL clash with Pygame.
+vision = ["pygame-ce>=2.4", "numpy>=1.26", "opencv-python-headless>=4.9", "onnxruntime>=1.17"]
+dev = [
+    "pygame-ce>=2.4",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+    "onnxruntime>=1.17",
+    "pytest>=8",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
 
 [project.scripts]
 hapticsight-sim = "hapticsight.simulation.cli:main"
+hapticsight-vision = "hapticsight.vision.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["hapticsight*"]
@@ -44,5 +55,5 @@ no_implicit_optional = true
 check_untyped_defs = true
 
 [[tool.mypy.overrides]]
-module = ["pygame", "pygame.*"]
+module = ["pygame", "pygame.*", "onnxruntime", "onnxruntime.*"]
 ignore_missing_imports = true

@@ -40,6 +40,18 @@ class HapticSightConfig:
     haptics: HapticConfig = field(default_factory=HapticConfig)
     camera_expire_after_s: float = 0.5
 
+    def __post_init__(self) -> None:
+        # Cross-layer invariants that keep fusion from hiding valid warnings.
+        if self.fusion.min_camera_confidence < self.risk.min_confidence:
+            raise ValueError(
+                "fusion.min_camera_confidence must be >= risk.min_confidence, otherwise a "
+                "fused observation could be ignored while its echo is suppressed"
+            )
+        if max(self.fusion.max_ultrasonic_age_s, self.fusion.max_camera_age_s) >= (
+            self.risk.stale_after_s
+        ):
+            raise ValueError("fusion age limits must be < risk.stale_after_s")
+
 
 def _override(instance: Any, data: dict[str, Any], path: str) -> Any:
     names = {f.name: f for f in dataclasses.fields(instance)}

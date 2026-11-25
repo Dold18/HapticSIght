@@ -101,16 +101,28 @@ bearing uncertainty genuinely spans a diagonal sector, or in the simulator's gro
 
 Arduino pins for trigger/echo: **TBD** by hardware.
 
-## 4. Cameras (Proposed)
+## 4. Cameras (mount bearings Agreed; optics unknown)
 
-| Camera     | Bearing | Horizontal FOV (provisional) |
-|------------|--------:|------------------------------|
-| CAM_FRONT  | 0°      | 60°                          |
-| CAM_REAR   | 180°    | 60°                          |
+| Camera     | Mount bearing | Image right side faces | Optics |
+|------------|--------------:|------------------------|--------|
+| CAM_FRONT  | 0°            | wearer's right (→ ~30°) | **unknown**: measure via calibration |
+| CAM_REAR   | 180°          | wearer's **left** (→ ~210°) | **unknown**: measure via calibration |
 
-Cameras connect to the MacBook over USB. They produce **bearing-only** detections: a monocular
-webcam does not measure metric range, so camera observations always carry
-`range_status = UNKNOWN` and `closing_speed = None`. FOV must be calibrated per camera.
+* The two USB webcams' models, resolutions, frame rates, and fields of view are not yet known
+  and are **not hard-coded**. Software defaults to a *nominal* 60° HFOV with ±15° uncertainty
+  until the calibration procedure in [COMPUTER_VISION.md §6](COMPUTER_VISION.md#6-calibration-procedure)
+  is run on the mounted cameras. The two cameras may have different FOVs.
+* Bearing = mount bearing + measured yaw offset + angle within the image (positive to the
+  camera's right = clockwise). For the rear camera, the image's right side is the wearer's left.
+  Mirrored webcams are supported (`mirrored = true`).
+* **Mounting request for the hardware workstream:** keep each camera level (no roll) and aimed
+  horizontally, record its mounting height and any deliberate yaw, and keep the mount rigid.
+  Yaw errors shift every bearing one-for-one.
+* Cameras connect to the MacBook over USB and produce **bearing-only** detections:
+  `range_status = UNKNOWN`, `closing_speed = None`. Camera loss does not trigger the DEGRADED
+  motor cue: cameras add bearing detail and never provide the only warning.
+* The host's device-index → CAM_FRONT/CAM_REAR assignment is machine-specific
+  (`config/cameras.local.toml`), because OpenCV index order is not guaranteed.
 
 ## 5. Software / hardware boundary
 
@@ -118,7 +130,7 @@ webcam does not measure metric range, so camera observations always carry
 |----------------|-----------------------------|-------------------------------|
 | Fire HC-SR04s, measure echo time, convert to cm | — | ✔ |
 | Report ranges (`$US`) and status (`$ST`) | parse & validate | ✔ |
-| Camera capture, object detection | ✔ (future milestone) | — |
+| Camera capture, object detection, tracking, bearing | ✔ (Milestone 2) | — |
 | Sensor fusion, risk assessment, haptic encoding | ✔ | — |
 | Pattern table (timing) | defines, sends `$PAT` | stores (defaults built in) |
 | Pulse timing of each motor | models it (`PulseScheduler`) | ✔ executes it |

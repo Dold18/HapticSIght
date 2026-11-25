@@ -2,7 +2,8 @@
 
 HapticSight is a wearable obstacle-awareness prototype: 4 ultrasonic sensors + 2 webcams →
 Python pipeline on a MacBook → 8 on/off ERM vibration motors via an Arduino Uno. This repo is the
-software. **Read [docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md) first**; it records what
+software: shared pipeline + simulator (Milestone 1) and dual-camera computer vision
+(Milestone 2, `hapticsight/vision/`). **Read [docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md) first**; it records what
 is done, what is pending, and why.
 
 ## Commands
@@ -16,6 +17,12 @@ hapticsight-sim [-s N]                   # interactive simulator (scenario N, 0 
 hapticsight-sim --headless -s N          # print a scenario timeline without a window
 hapticsight-sim -s N --screenshot x.png --at T   # offscreen render (set SDL_VIDEODRIVER=dummy)
 hapticsight-sim -s N --frames 300        # real window for 300 frames, prints achieved FPS
+hapticsight-vision download-model yolox_tiny        # one-time, explicit network use
+hapticsight-vision cameras                          # probe cameras / permission hints
+hapticsight-vision live --front 0 --rear 1 --ultrasonic "S0=90"
+hapticsight-vision live --front synthetic --rear synthetic --model synthetic   # no camera/model
+hapticsight-vision replay --front VIDEO --export out.jsonl                     # deterministic
+hapticsight-vision benchmark --system --front 0 --rear 1 --seconds 20
 ```
 
 All four checks (pytest, ruff check, ruff format --check, mypy) must pass before committing.
@@ -31,14 +38,21 @@ hapticsight/protocol/    serial protocol v1 codec, StreamDecoder, LinkMonitor
 hapticsight/hardware/    adapter Protocols, ArduinoBridge (host side, transport-agnostic)
 hapticsight/pipeline.py  HapticSightPipeline, the ONE shared processing chain
 hapticsight/config.py    HapticSightConfig aggregate + TOML loader (config/example.toml)
-hapticsight/simulation/  world, simulated sensors, scenarios, engine (headless), cli, app (pygame)
+hapticsight/simulation/  world, simulated sensors, scenarios, engine (headless), cli, app (pygame),
+                         manual_ultrasonic (SIMULATED ranges for live demos)
+hapticsight/vision/      camera (threaded capture), detector + models (YOLOX ONNX), geometry
+                         (pixel->bearing, calibration), tracker, observations, processor
+                         (VisionSystem), recording (record/replay), live_app, cli, synthetic
 tests/                   one file per layer + test_scenarios.py (regressions) + test_app_smoke.py
-docs/                    ARCHITECTURE, HARDWARE_INTERFACE, PROTOCOL, DEVELOPMENT_STATUS
+docs/                    ARCHITECTURE, HARDWARE_INTERFACE, PROTOCOL, COMPUTER_VISION, THIRD_PARTY,
+                         DEVELOPMENT_STATUS
+models/, recordings/     git-ignored: model weights and local camera recordings (never commit)
 ```
 
 ## Invariants (do not break)
 
-1. **Layering.** Only `simulation/app.py` imports pygame. Nothing outside `simulation/` imports
+1. **Layering.** Only `simulation/app.py` and `vision/live_app.py` import pygame; numpy/OpenCV/
+   ONNX Runtime are imported only inside `vision/`. Nothing outside `simulation/` imports
    from `simulation/`. Perception/risk/haptics logic lives in the shared packages and is called via
    `HapticSightPipeline`; the simulator must not re-implement or bypass it (ground-truth mode
    bypasses *perception only*, via `process_observations`).
@@ -56,8 +70,15 @@ docs/                    ARCHITECTURE, HARDWARE_INTERFACE, PROTOCOL, DEVELOPMENT
    scenario's `expected` text, the test, and the README table together.
 6. **Protocol.** Lines ≤ 64 bytes, integer fields, XOR checksum. Changing message layout requires
    bumping `PROTOCOL_VERSION` and updating docs/PROTOCOL.md and pinned examples in tests.
-7. **Honesty.** The Arduino firmware is not implemented and nothing has been validated on hardware.
-   Docs must keep implemented vs planned clearly separated.
+7. **Honesty.** The Arduino firmware is not implemented and nothing has been validated on the vest.
+   Docs must keep implemented vs planned clearly separated, and benchmarks must say whether they
+   came from real cameras (which ones), prerecorded video, or synthetic input.
+8. **Vision outputs only shared `Observation`s**: `source=CAMERA`, `range_status=UNKNOWN`,
+   `distance_cm=None`, `closing_speed_cm_s=None`. Never turn pixel motion or box growth into a
+   metric closing speed or distance. Never fuse weak or stale camera detections (see D21).
+9. **Simulated ultrasonic data is labelled `SIMULATED`** everywhere (UI, logs, exports).
+10. **Privacy / repo size.** Never commit model files, camera recordings, or third-party video.
+    Tests use fakes and synthetic video only; CI must not need a webcam or a model download.
 
 ## Conventions
 
@@ -73,7 +94,8 @@ docs/                    ARCHITECTURE, HARDWARE_INTERFACE, PROTOCOL, DEVELOPMENT
 
 ## Agent workflow
 
-* Work on a feature branch; Milestone 1 is on `feature/software-foundation-simulator`.
+* Work on a feature branch per milestone (M1 merged via PR #1; M2 is
+  `feature/dual-camera-computer-vision`).
   **Never merge into `main`, force-push, or rewrite history without the owner's explicit approval.**
 * Commit logically separated changes with descriptive messages.
 * Update `docs/DEVELOPMENT_STATUS.md` (status, decisions, test results, next steps) at the end of

@@ -3,11 +3,12 @@
 ## 1. Data flow
 
 ```
- ┌──────────────── sources (swappable) ────────────────┐
- │ simulation/sensors.py      hardware/arduino.py      │
- │ SimulatedUltrasonicArray   ArduinoBridge (future HW)│──► UltrasonicReading
- │ SimulatedCamera            CameraDetector (future)  │──► Observation (bearing only)
- └─────────────────────────────────────────────────────┘
+ ┌──────────────────── sources (swappable) ──────────────────────┐
+ │ simulation/sensors.py       hardware/arduino.py (future HW)   │
+ │ SimulatedUltrasonicArray    ArduinoBridge                     │──► UltrasonicReading
+ │ simulation/manual_ultrasonic.ManualUltrasonic (SIMULATED)     │──► UltrasonicReading
+ │ SimulatedCamera             vision/ VisionSystem (real cams)  │──► Observation (bearing only)
+ └───────────────────────────────────────────────────────────────┘
                               │
                               ▼
  hapticsight/pipeline.py  HapticSightPipeline.process(now, readings, detections)
@@ -39,6 +40,7 @@ imports from `simulation/` or `pygame`.
 | `haptics/` | bearing→motor mapping, pulse patterns, encoder, scheduler | core, risk |
 | `protocol/` | serial protocol v1 messages, codec, stream framing, link monitor | stdlib |
 | `hardware/` | device adapter interfaces; host-side Arduino bridge | core, haptics, protocol |
+| `vision/` | camera capture, YOLOX detection, tracking, bearing geometry, live app, replay, CLI | core, pipeline (numpy, OpenCV, ONNX Runtime) |
 | `config.py` | aggregates per-layer config dataclasses; TOML overrides | all layer configs |
 | `pipeline.py` | the one shared processing chain | perception, risk, haptics |
 | `simulation/` | world, simulated sensors, scenarios, headless engine, CLI, Pygame app | everything above |
@@ -82,10 +84,17 @@ A future hardware runtime is then a loop: `bridge.poll()` + `camera.poll()` →
 | D9 | **Release hysteresis instead of debouncing.** Escalation is immediate; de-escalation waits `release_hold_s`. | Removes flicker from intermittent echoes without ever delaying a more urgent warning. |
 | D10 | **Urgency encoded in timing** (rate, duty, double-tap for approach). | Hardware is on/off ERM via shift register: no amplitude control. |
 | D11 | **Host sends pattern slots, firmware generates pulses.** | Keeps timing independent of USB jitter; fits Uno SRAM; one hex digit per motor. |
-| D12 | **Fusion = simple gating, conservative on ambiguity.** A shared echo goes to every camera detection in the gate (flagged `shared_range`); stale echoes are never fused. | Explainable foundation; avoids attaching wrong-age data. |
+| D12 | **Fusion = simple gating, conservative on ambiguity.** A shared echo goes to every confident camera detection in the gate (flagged `shared_range`); stale echoes and stale or weak camera detections are never fused (see D21). | Explainable foundation; avoids attaching wrong-age data. |
 | D13 | **Fixed-timestep simulation on a `ManualClock`; all logic takes `now` explicitly.** | Determinism, frame-rate independence, trivially testable. Real runs use `time.monotonic()`. |
 | D14 | **Simulator has a ground-truth mode.** | Lets users see what perfect perception would do versus what four sensors and two cameras can actually support. |
 | D15 | **Deterministic rules, no ML in the risk engine (v1).** | Required by the milestone brief; easy to test and reason about. |
+| D16 | **Vision emits only the shared `Observation`** (CAMERA, range UNKNOWN, no closing speed); there is no parallel obstacle model. | Camera data goes through the same fusion → risk → haptics path as simulated cameras. |
+| D17 | **YOLOX-Tiny (Apache-2.0) via ONNX Runtime + CoreML**, no PyTorch. | Best measured quality/latency trade-off on the M1 with a permissive licence; small footprint (COMPUTER_VISION.md §3). |
+| D18 | **Newest-frame slots, one inference worker, rate cap per camera.** | Bounded latency (frames dropped, never queued); one model in memory; predictable CPU/thermal load. |
+| D19 | **Greedy IoU tracker with motion prediction**; image-plane motion kept separate from metric motion. | Adequate at ≥ 10 fps, deterministic, dependency-free; box growth is not a range rate. |
+| D20 | **Explicit per-detection bearing-uncertainty budget** (yaw, FOV, distortion, box). | Calibration quality flows honestly into motor spreading; uncalibrated cameras are visibly uncertain. |
+| D21 | **Fused confidence = min(camera, ultrasonic)**; weak or stale camera detections are never fused; echoes are suppressed only by confident fusion (validated config invariant). | Fixes the PR #1 finding; a bad association can never remove an independent ultrasonic warning. |
+| D22 | **Camera-only advisory cue is experimental and off by default** (slot 8, lowest rank, ≤ 1 channel). | Explores unranged awareness without implying distance or danger. |
 
 ## 5. Determinism and timing
 

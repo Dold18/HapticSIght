@@ -7,8 +7,8 @@ Per update the encoder:
    genuinely reaches them).
 2. Requests a *rank* on each of those motors (higher = more urgent)::
 
-       0 OFF  1 DEGRADED  2 CAUTION  3 CAUTION+APPROACH
-       4 WARNING  5 WARNING+APPROACH  6 CRITICAL  7 CRITICAL+APPROACH
+       0 OFF  1 ADVISORY  2 DEGRADED  3 CAUTION  4 CAUTION+APPROACH
+       5 WARNING  6 WARNING+APPROACH  7 CRITICAL  8 CRITICAL+APPROACH
 
    When several obstacles hit the same motor, the highest rank wins.
 3. Requests DEGRADED on the motor facing any ultrasonic sensor whose coverage
@@ -22,6 +22,14 @@ Per update the encoder:
 Stale or low-confidence observations are already rated Severity.NONE by the
 risk engine, so they cannot drive a hazard pattern; once the hold expires the
 channel falls back to DEGRADED (if coverage is lost) or OFF.
+
+**Experimental advisory cue (disabled by default).** When
+``advisory_cue_enabled`` is set, at most ``advisory_max_channels`` camera-only
+objects (no measured range) that are confident, tracked for a while, and in
+the forward path may request ADVISORY: a single 40 ms tick every 3 s, the
+lowest rank. It never implies distance or danger, never overrides a hazard or
+a degraded-coverage cue, and uses its own pattern slot (8), documented in
+docs/PROTOCOL.md as optional.
 """
 
 from __future__ import annotations
@@ -29,16 +37,21 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
+from hapticsight.core.geometry import angular_distance
 from hapticsight.core.layout import MOTOR_COUNT
+from hapticsight.core.models import RangeStatus, SourceType
 from hapticsight.haptics.mapping import motor_for_bearing, motors_for_bearing
 from hapticsight.haptics.patterns import DEFAULT_PATTERNS, PatternId, PulsePattern
-from hapticsight.risk.engine import RiskReport, Severity
+from hapticsight.risk.engine import RiskAssessment, RiskReport, Severity
 
-RANK_COUNT = 8
-RANK_DEGRADED = 1
+RANK_COUNT = 9
+RANK_ADVISORY = 1
+RANK_DEGRADED = 2
+RANK_FIRST_HAZARD = 3
 
 _RANK_TO_PATTERN: tuple[PatternId, ...] = (
     PatternId.OFF,
+    PatternId.ADVISORY,
     PatternId.DEGRADED,
     PatternId.CAUTION,
     PatternId.CAUTION_APPROACH,
@@ -52,7 +65,15 @@ _RANK_TO_PATTERN: tuple[PatternId, ...] = (
 def hazard_rank(severity: Severity, approaching: bool) -> int:
     if severity is Severity.NONE:
         return 0
-    return int(severity) * 2 + int(approaching)
+    return int(severity) * 2 + int(approaching) + 1
+
+
+def rank_severity(rank: int) -> Severity:
+    return Severity((rank - 1) // 2) if rank >= RANK_FIRST_HAZARD else Severity.NONE
+
+
+def rank_approaching(rank: int) -> bool:
+    return rank >= RANK_FIRST_HAZARD and rank % 2 == 0
 
 
 def rank_to_pattern(rank: int) -> PatternId:
@@ -66,6 +87,13 @@ class HapticConfig:
     command_ttl_ms: int = 500
     signal_degraded_coverage: bool = True
     spread_with_bearing_uncertainty: bool = True
+    # Experimental camera-only advisory cue (see module docstring). Off by default.
+    advisory_cue_enabled: bool = False
+    advisory_min_confidence: float = 0.6
+    advisory_min_track_age_s: float = 1.0
+    advisory_max_channels: int = 1
+    advisory_forward_only: bool = True
+    advisory_forward_half_angle_deg: float = 45.0
 
     def __post_init__(self) -> None:
         missing = [p.name for p in PatternId if p not in self.patterns]
@@ -86,6 +114,7 @@ class ChannelCommand:
     approaching: bool
     degraded: bool
     held: bool  # True when maintained only by release hysteresis
+    advisory: bool  # experimental camera-only cue (no distance implied)
     sources: tuple[str, ...]
 
     @property
@@ -143,7 +172,34 @@ class HapticEncoder:
                 if ranks[m] < RANK_DEGRADED:
                     ranks[m] = RANK_DEGRADED
                     sources[m] = [f"{h.sensor_id}:{h.status.value}"]
+        if cfg.advisory_cue_enabled:
+            for a in self.advisory_candidates(report)[: cfg.advisory_max_channels]:
+                m = motor_for_bearing(a.bearing_deg)
+                if ranks[m] < RANK_ADVISORY:
+                    ranks[m] = RANK_ADVISORY
+                    sources[m] = [a.id]
         return ranks, sources
+
+    def advisory_candidates(self, report: RiskReport) -> list[RiskAssessment]:
+        """Camera-only (unranged) objects eligible for the advisory cue, best first."""
+        cfg = self.config
+        out = []
+        for a in report.assessments:
+            obs = a.observation
+            if obs.source is not SourceType.CAMERA or obs.range_status is not RangeStatus.UNKNOWN:
+                continue
+            if a.is_stale or a.is_low_confidence or obs.confidence < cfg.advisory_min_confidence:
+                continue
+            if float(obs.metadata.get("track_age_s", 0.0)) < cfg.advisory_min_track_age_s:
+                continue
+            off_axis = angular_distance(obs.bearing_deg, 0.0)
+            if cfg.advisory_forward_only and off_axis > cfg.advisory_forward_half_angle_deg:
+                continue
+            out.append(a)
+        out.sort(
+            key=lambda a: (angular_distance(a.bearing_deg, 0.0), -a.observation.confidence, a.id)
+        )
+        return out
 
     def encode(self, report: RiskReport, now: float) -> HapticFrame:
         cfg = self.config
@@ -162,16 +218,16 @@ class HapticEncoder:
                     effective = r
                     break
             pid = rank_to_pattern(effective)
-            severity = Severity(effective // 2) if effective >= 2 else Severity.NONE
             channels.append(
                 ChannelCommand(
                     motor=m,
                     pattern_id=pid,
                     pattern=cfg.patterns[pid],
-                    severity=severity,
-                    approaching=effective >= 2 and effective % 2 == 1,
+                    severity=rank_severity(effective),
+                    approaching=rank_approaching(effective),
                     degraded=effective == RANK_DEGRADED,
                     held=effective != req,
+                    advisory=effective == RANK_ADVISORY,
                     sources=self._last_sources[m][effective] if effective else (),
                 )
             )
