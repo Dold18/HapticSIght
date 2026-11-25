@@ -135,7 +135,7 @@ DEMO_SCENE = SyntheticScene(
         SyntheticObject("person", x=-60, y=120, w=50, h=150, vx=45),  # walks left -> right
         SyntheticObject("chair", x=420, y=220, w=70, h=80),
         SyntheticObject("car", x=520, y=140, w=90, h=60, grow_per_s=3.0, visible_from=2.0),
-        SyntheticObject("bicycle", x=200, y=150, w=60, h=60, vx=-20, visible_until=6.0),
+        SyntheticObject("bicycle", x=200, y=30, w=60, h=60, vx=-20, visible_until=6.0),
     )
 )
 
