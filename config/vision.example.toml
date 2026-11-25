@@ -1,0 +1,50 @@
+# Example HapticSight vision configuration (Milestone 2).
+# Use with:  hapticsight-vision live --config config/vision.example.toml
+#
+# Machine-specific values (which device index is which camera, measured
+# calibration) belong in config/cameras.local.toml, which is git-ignored and
+# loaded automatically. Nothing about the webcams is hard-coded: omit width /
+# height / fps to use the driver default.
+
+max_inference_fps_per_camera = 15.0   # per camera; caps CPU/thermal load on the M1
+model_dir = "models"
+
+[detector]
+model = "yolox_tiny"        # yolox_nano | yolox_tiny | yolox_s | path/to/model.onnx | synthetic
+runtime = "auto"            # auto | onnxruntime | onnxruntime-coreml | opencv
+score_threshold = 0.25      # pre-NMS candidate threshold
+nms_threshold = 0.45
+
+[filter]
+min_confidence = 0.4
+# classes = "all"           # or a list of COCO names; default = obstacle-relevant subset
+min_box_area_fraction = 0.0005
+
+[tracker]
+iou_threshold = 0.25
+min_hits = 2                # detections needed before a track is trusted
+max_missed_s = 0.6          # persistence through brief missed detections
+
+[cameras.CAM_FRONT]
+device = 0                  # OpenCV index, video path, or "synthetic"
+enabled = true
+# width = 1280
+# height = 720
+# fps = 30
+
+[cameras.CAM_FRONT.calibration]
+hfov_deg = 60.0             # NOMINAL until measured; see docs/COMPUTER_VISION.md
+hfov_uncertainty_deg = 15.0
+yaw_offset_deg = 0.0
+yaw_uncertainty_deg = 5.0
+mirrored = false
+
+[cameras.CAM_REAR]
+device = 1
+enabled = true
+
+[cameras.CAM_REAR.calibration]
+hfov_deg = 60.0
+hfov_uncertainty_deg = 15.0
+yaw_offset_deg = 0.0
+yaw_uncertainty_deg = 5.0
