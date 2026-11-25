@@ -13,6 +13,8 @@ SRAM (uint16 times, uint8 count) and can be sent with a ``$PAT`` message.
 
 The approaching cue is a **double pulse** at the same base repetition rate as
 the plain severity pattern. The degraded-coverage cue is a sparse triple blip.
+The experimental ADVISORY cue (slot 8, off unless enabled) is one 40 ms tick
+every 3 s, so it cannot be mistaken for a proximity warning.
 These defaults are provisional and need user testing on the real vest.
 """
 
@@ -38,6 +40,7 @@ class PatternId(IntEnum):
     WARNING_APPROACH = 5
     CRITICAL_APPROACH = 6
     DEGRADED = 7
+    ADVISORY = 8  # experimental, optional (camera-only, unranged objects)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,5 +110,7 @@ DEFAULT_PATTERNS: Mapping[PatternId, PulsePattern] = MappingProxyType(
         PatternId.CRITICAL_APPROACH: PulsePattern(on_ms=100, off_ms=30, count=2, pause_ms=20),
         # Sensor coverage lost: sparse triple blip every 2 s
         PatternId.DEGRADED: PulsePattern(on_ms=50, off_ms=80, count=3, pause_ms=1690),
+        # Experimental: single short tick every 3 s; deliberately unlike any hazard cue
+        PatternId.ADVISORY: PulsePattern(on_ms=40, pause_ms=2960),
     }
 )

@@ -3,7 +3,13 @@ from __future__ import annotations
 import pytest
 
 from hapticsight.core.models import SensorHealth, SensorStatus
-from hapticsight.haptics.encoder import HapticConfig, HapticEncoder, hazard_rank
+from hapticsight.haptics.encoder import (
+    RANK_ADVISORY,
+    RANK_DEGRADED,
+    HapticConfig,
+    HapticEncoder,
+    hazard_rank,
+)
 from hapticsight.haptics.mapping import motor_for_bearing, motors_for_bearing
 from hapticsight.haptics.patterns import DEFAULT_PATTERNS, PatternId, PulsePattern
 from hapticsight.haptics.scheduler import PulseScheduler
@@ -118,7 +124,9 @@ def test_rank_ordering() -> None:
     assert hazard_rank(Severity.NONE, True) == 0
     assert hazard_rank(Severity.CAUTION, False) < hazard_rank(Severity.CAUTION, True)
     assert hazard_rank(Severity.CAUTION, True) < hazard_rank(Severity.WARNING, False)
-    assert hazard_rank(Severity.CRITICAL, True) == 7
+    assert hazard_rank(Severity.CRITICAL, True) == 8
+    # advisory < degraded < every hazard
+    assert RANK_ADVISORY < RANK_DEGRADED < hazard_rank(Severity.CAUTION, False)
 
 
 def test_single_obstacle_maps_to_correct_motor() -> None:
