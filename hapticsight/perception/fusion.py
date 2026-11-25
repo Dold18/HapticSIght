@@ -4,18 +4,26 @@ The cameras give good *bearing* but no metric range; the ultrasonic sensors give
 range but only a coarse sector bearing. This module pairs them with a simple,
 explainable gating rule:
 
+* Only **fresh, sufficiently confident** camera detections may be associated
+  (``min_camera_confidence``, ``max_camera_age_s``). Low-confidence detections
+  pass through unchanged as camera-only observations; they never borrow
+  confidence from an echo.
+* Only fresh echoes are used (``max_ultrasonic_age_s``).
 * A camera detection is associated with an ultrasonic echo when the camera
   bearing lies within ``beam_half_angle + association_margin`` of that sensor's
   boresight. The margin accounts for wide objects whose body overlaps the beam
   even though their centre is outside it.
 * The fused observation takes bearing from the camera and distance / closing
-  speed from the ultrasonic echo.
+  speed from the echo. Its confidence is ``min(camera, ultrasonic)``: the joint
+  claim "this object, at this bearing, at this range" is no more certain than
+  its weakest part.
 * An HC-SR04 reports only the *nearest* echo. If several camera detections
   share one echo we cannot tell which object produced it, so each gets the
   (conservative, i.e. nearest) range and is flagged ``shared_range``.
-* The raw ultrasonic observation is suppressed only when the associated camera
-  bearing lies inside the beam itself. Otherwise both are kept, because the
-  echo may come from an object the camera does not see.
+* The raw ultrasonic observation is suppressed only when an accepted camera
+  bearing lies inside the beam itself **and** the fused observation is at least
+  as trustworthy as the gate. Otherwise the echo is kept, so an unreliable
+  association can never remove an independent ultrasonic proximity warning.
 * Camera detections with no echo match remain bearing-only (range UNKNOWN).
 
 Nothing here invents range for a camera-only object.
@@ -35,6 +43,16 @@ class FusionConfig:
     enabled: bool = True
     association_margin_deg: float = 10.0
     max_ultrasonic_age_s: float = 0.4
+    max_camera_age_s: float = 0.4
+    # Must be >= RiskConfig.min_confidence (validated by HapticSightConfig) so an
+    # accepted fused observation is always actionable when its echo would be.
+    min_camera_confidence: float = 0.5
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.min_camera_confidence <= 1.0:
+            raise ValueError("min_camera_confidence must be within [0, 1]")
+        if self.max_ultrasonic_age_s <= 0 or self.max_camera_age_s <= 0:
+            raise ValueError("fusion age limits must be positive")
 
 
 def fuse(
@@ -64,6 +82,12 @@ def fuse(
     best_for_cam: dict[str, Observation] = {}
 
     for cam in camera:
+        eligible = cam.confidence >= cfg.min_camera_confidence and (
+            now is None or cam.age(now) <= cfg.max_camera_age_s
+        )
+        if not eligible:
+            unmatched_camera.append(cam)
+            continue
         candidates = [
             u
             for u in ranged_us
@@ -85,10 +109,11 @@ def fuse(
     for cam_id, us in best_for_cam.items():
         cam = next(c for c in camera if c.id == cam_id)
         sharers = len(matches[us.id])
+        confidence = min(cam.confidence, us.confidence)
         inside_beam = (
             angular_distance(cam.bearing_deg, us.bearing_deg) <= us.bearing_uncertainty_deg
         )
-        if inside_beam:
+        if inside_beam and confidence >= cfg.min_camera_confidence:
             suppressed_us.add(us.id)
         fused.append(
             Observation(
@@ -99,7 +124,7 @@ def fuse(
                 # Use the older timestamp so the fused result is never fresher
                 # than its stalest input.
                 timestamp=min(cam.timestamp, us.timestamp),
-                confidence=max(cam.confidence, us.confidence),
+                confidence=confidence,
                 range_status=RangeStatus.VALID,
                 distance_cm=us.distance_cm,
                 distance_uncertainty_cm=us.distance_uncertainty_cm,
@@ -110,6 +135,7 @@ def fuse(
                     "ultrasonic_id": us.id,
                     "shared_range": sharers > 1,
                     "camera_confidence": cam.confidence,
+                    "ultrasonic_confidence": us.confidence,
                 },
             )
         )
