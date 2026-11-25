@@ -1,0 +1,49 @@
+# Example HapticSight configuration. Every key is optional; omitted keys keep
+# their defaults (see hapticsight/config.py and the per-layer dataclasses).
+# Use with:  hapticsight-sim --config config/example.toml
+#
+# Values below are the current provisional defaults, shown for reference.
+
+[ultrasonic]
+beam_half_angle_deg = 15.0      # HC-SR04 nominal cone; reality varies with target
+min_range_cm = 2.0
+max_range_cm = 400.0
+distance_uncertainty_cm = 2.0
+stale_after_s = 0.4             # no reading for this long -> sector coverage lost
+
+[range_rate]
+window_s = 0.6
+min_samples = 4
+
+[fusion]
+enabled = true
+association_margin_deg = 10.0
+
+[risk]
+approach_speed_cm_s = 15.0      # |closing speed| needed to call approach/recede
+ttc_critical_s = 1.0
+ttc_warning_s = 2.0
+ttc_caution_s = 3.0
+min_confidence = 0.35
+stale_after_s = 0.5
+expire_after_s = 2.0
+forward_path_half_angle_deg = 30.0
+
+[risk.thresholds]
+caution_cm = 200.0              # 100 <= d <= 200
+warning_cm = 100.0              # 50 <= d < 100
+critical_cm = 50.0              # d < 50
+
+[haptics]
+release_hold_s = 0.35           # anti-flicker hold before stepping down
+command_ttl_ms = 500
+signal_degraded_coverage = true
+spread_with_bearing_uncertainty = true
+
+# Pattern timing (ms). Slots: CAUTION, WARNING, CRITICAL, CAUTION_APPROACH,
+# WARNING_APPROACH, CRITICAL_APPROACH, DEGRADED.
+[haptics.patterns.WARNING]
+on_ms = 150
+off_ms = 0
+count = 1
+pause_ms = 350

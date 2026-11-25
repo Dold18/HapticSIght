@@ -8,7 +8,6 @@ version = "0.1.0"
 description = "Wearable computer-vision and haptic obstacle-awareness prototype: shared perception, risk, and haptic logic plus an interactive simulator."
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
 authors = [{ name = "Jacob Dold" }]
 dependencies = []
 
