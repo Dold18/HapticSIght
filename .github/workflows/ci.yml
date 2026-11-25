@@ -39,6 +39,7 @@ jobs:
         run: make -C firmware/arduino_uno test
       - name: Install arduino-cli
         run: |
+          mkdir -p "$HOME/bin"
           curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=$HOME/bin sh
           echo "$HOME/bin" >> "$GITHUB_PATH"
       - name: Install AVR core
