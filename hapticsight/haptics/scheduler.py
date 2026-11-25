@@ -45,6 +45,10 @@ class PulseScheduler:
     def active_pattern(self, motor: int, now: float) -> PatternId:
         return PatternId.OFF if self.expired(now) else self._pattern_ids[motor]
 
+    def pattern_state(self, motor: int) -> tuple[PulsePattern | None, float]:
+        """Current pattern for ``motor`` and the time it started (for display)."""
+        return self._patterns[motor], self._started_at[motor]
+
     def outputs(self, now: float) -> tuple[bool, ...]:
         if self.expired(now):
             return (False,) * MOTOR_COUNT
