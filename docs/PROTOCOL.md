@@ -110,7 +110,13 @@ on connect.
 | 5 | WARNING_APPROACH | 100 | 60 | 2 | 240 | 500 ms | 40 % | 2 Hz double tap |
 | 6 | CRITICAL_APPROACH | 100 | 30 | 2 | 20 | 250 ms | 80 % | 4 Hz double tap |
 | 7 | DEGRADED | 50 | 80 | 3 | 1690 | 2000 ms | 8 % | sparse triple blip |
-| 8–15 | reserved | | | | | | | |
+| 8 | ADVISORY *(experimental, optional)* | 40 | 0 | 1 | 2960 | 3000 ms | 1 % | single tick every 3 s |
+| 9–15 | reserved | | | | | | | |
+
+Slot 8 (added in Milestone 2, backwards compatible) is used only when the host's experimental
+camera-only advisory cue is enabled; it is **off by default**. The host defines it with `$PAT` like
+every other slot. *Firmware requirement:* a slot that has never been defined (no built-in
+default and no `$PAT`) must play as OFF, so older firmware stays safe.
 
 These timings are provisional and need tuning with the real motors and wearer feedback.
 
