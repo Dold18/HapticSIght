@@ -1,0 +1,178 @@
+"""Risk report -> eight motor channel commands.
+
+Per update the encoder:
+
+1. Maps each actionable assessment to the motor(s) covering its bearing
+   (spreading across neighbouring sectors only when bearing uncertainty
+   genuinely reaches them).
+2. Requests a *rank* on each of those motors (higher = more urgent)::
+
+       0 OFF  1 DEGRADED  2 CAUTION  3 CAUTION+APPROACH
+       4 WARNING  5 WARNING+APPROACH  6 CRITICAL  7 CRITICAL+APPROACH
+
+   When several obstacles hit the same motor, the highest rank wins.
+3. Requests DEGRADED on the motor facing any ultrasonic sensor whose coverage
+   is lost (stale / fault / never seen), unless a hazard outranks it. Missing
+   data is thereby signalled instead of being silently rendered as "clear".
+4. Applies **release hysteresis**: escalation is immediate, but a channel only
+   drops to a lower rank after that higher rank has not been requested for
+   ``release_hold_s``. This stops flicker from noisy or intermittent detections
+   without ever delaying a more urgent warning.
+
+Stale or low-confidence observations are already rated Severity.NONE by the
+risk engine, so they cannot drive a hazard pattern; once the hold expires the
+channel falls back to DEGRADED (if coverage is lost) or OFF.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+
+from hapticsight.core.layout import MOTOR_COUNT
+from hapticsight.haptics.mapping import motor_for_bearing, motors_for_bearing
+from hapticsight.haptics.patterns import DEFAULT_PATTERNS, PatternId, PulsePattern
+from hapticsight.risk.engine import RiskReport, Severity
+
+RANK_COUNT = 8
+RANK_DEGRADED = 1
+
+_RANK_TO_PATTERN: tuple[PatternId, ...] = (
+    PatternId.OFF,
+    PatternId.DEGRADED,
+    PatternId.CAUTION,
+    PatternId.CAUTION_APPROACH,
+    PatternId.WARNING,
+    PatternId.WARNING_APPROACH,
+    PatternId.CRITICAL,
+    PatternId.CRITICAL_APPROACH,
+)
+
+
+def hazard_rank(severity: Severity, approaching: bool) -> int:
+    if severity is Severity.NONE:
+        return 0
+    return int(severity) * 2 + int(approaching)
+
+
+def rank_to_pattern(rank: int) -> PatternId:
+    return _RANK_TO_PATTERN[rank]
+
+
+@dataclass(frozen=True, slots=True)
+class HapticConfig:
+    patterns: Mapping[PatternId, PulsePattern] = field(default_factory=lambda: DEFAULT_PATTERNS)
+    release_hold_s: float = 0.35
+    command_ttl_ms: int = 500
+    signal_degraded_coverage: bool = True
+    spread_with_bearing_uncertainty: bool = True
+
+    def __post_init__(self) -> None:
+        missing = [p.name for p in PatternId if p not in self.patterns]
+        if missing:
+            raise ValueError(f"pattern table missing entries: {missing}")
+        if self.release_hold_s < 0:
+            raise ValueError("release_hold_s must be non-negative")
+        if not 0 < self.command_ttl_ms <= 65535:
+            raise ValueError("command_ttl_ms must be in (0, 65535]")
+
+
+@dataclass(frozen=True, slots=True)
+class ChannelCommand:
+    motor: int
+    pattern_id: PatternId
+    pattern: PulsePattern
+    severity: Severity
+    approaching: bool
+    degraded: bool
+    held: bool  # True when maintained only by release hysteresis
+    sources: tuple[str, ...]
+
+    @property
+    def active(self) -> bool:
+        return self.pattern_id is not PatternId.OFF
+
+
+@dataclass(frozen=True, slots=True)
+class HapticFrame:
+    timestamp: float
+    channels: tuple[ChannelCommand, ...]
+    ttl_ms: int
+
+    @property
+    def pattern_ids(self) -> tuple[PatternId, ...]:
+        return tuple(c.pattern_id for c in self.channels)
+
+    def pattern_string(self) -> str:
+        """Compact form used on the wire: one hex digit per motor, M0 first."""
+        return "".join(f"{int(p):X}" for p in self.pattern_ids)
+
+
+class HapticEncoder:
+    def __init__(self, config: HapticConfig | None = None) -> None:
+        self.config = config or HapticConfig()
+        self.reset()
+
+    def reset(self) -> None:
+        # last time each rank was requested, per motor
+        self._last_requested: list[list[float | None]] = [
+            [None] * RANK_COUNT for _ in range(MOTOR_COUNT)
+        ]
+        self._last_sources: list[list[tuple[str, ...]]] = [
+            [()] * RANK_COUNT for _ in range(MOTOR_COUNT)
+        ]
+
+    def _requests(self, report: RiskReport) -> tuple[list[int], list[list[str]]]:
+        cfg = self.config
+        ranks = [0] * MOTOR_COUNT
+        sources: list[list[str]] = [[] for _ in range(MOTOR_COUNT)]
+        for a in report.actionable:
+            rank = hazard_rank(a.severity, a.is_approaching)
+            unc = (
+                a.observation.bearing_uncertainty_deg if cfg.spread_with_bearing_uncertainty else 0
+            )
+            for m in motors_for_bearing(a.bearing_deg, unc):
+                if rank > ranks[m]:
+                    ranks[m] = rank
+                    sources[m] = [a.id]
+                elif rank == ranks[m]:
+                    sources[m].append(a.id)
+        if cfg.signal_degraded_coverage:
+            for h in report.degraded_sensors:
+                m = motor_for_bearing(h.bearing_deg)
+                if ranks[m] < RANK_DEGRADED:
+                    ranks[m] = RANK_DEGRADED
+                    sources[m] = [f"{h.sensor_id}:{h.status.value}"]
+        return ranks, sources
+
+    def encode(self, report: RiskReport, now: float) -> HapticFrame:
+        cfg = self.config
+        requested, sources = self._requests(report)
+        channels: list[ChannelCommand] = []
+        for m in range(MOTOR_COUNT):
+            last = self._last_requested[m]
+            req = requested[m]
+            if req > 0:
+                last[req] = now
+                self._last_sources[m][req] = tuple(sources[m])
+            effective = req
+            for r in range(RANK_COUNT - 1, req, -1):
+                t = last[r]
+                if t is not None and now - t <= cfg.release_hold_s:
+                    effective = r
+                    break
+            pid = rank_to_pattern(effective)
+            severity = Severity(effective // 2) if effective >= 2 else Severity.NONE
+            channels.append(
+                ChannelCommand(
+                    motor=m,
+                    pattern_id=pid,
+                    pattern=cfg.patterns[pid],
+                    severity=severity,
+                    approaching=effective >= 2 and effective % 2 == 1,
+                    degraded=effective == RANK_DEGRADED,
+                    held=effective != req,
+                    sources=self._last_sources[m][effective] if effective else (),
+                )
+            )
+        return HapticFrame(now, tuple(channels), cfg.command_ttl_ms)
