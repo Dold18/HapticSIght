@@ -100,6 +100,8 @@ def test_default_patterns_escalate_in_duty_and_rate() -> None:
         (PatternId.CRITICAL, PatternId.CRITICAL_APPROACH),
     ]:
         assert DEFAULT_PATTERNS[approach].count == 2
+        # the approach cue must never feel weaker than the plain pattern
+        assert DEFAULT_PATTERNS[approach].duty_cycle >= DEFAULT_PATTERNS[plain].duty_cycle
         assert DEFAULT_PATTERNS[approach].cycle_ms == pytest.approx(
             DEFAULT_PATTERNS[plain].cycle_ms, rel=0.25
         )

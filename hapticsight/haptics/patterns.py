@@ -104,7 +104,7 @@ DEFAULT_PATTERNS: Mapping[PatternId, PulsePattern] = MappingProxyType(
         # Approaching variants: double tap at the same repetition rate
         PatternId.CAUTION_APPROACH: PulsePattern(on_ms=80, off_ms=80, count=2, pause_ms=760),
         PatternId.WARNING_APPROACH: PulsePattern(on_ms=100, off_ms=60, count=2, pause_ms=240),
-        PatternId.CRITICAL_APPROACH: PulsePattern(on_ms=100, off_ms=40, count=2, pause_ms=60),
+        PatternId.CRITICAL_APPROACH: PulsePattern(on_ms=100, off_ms=30, count=2, pause_ms=20),
         # Sensor coverage lost: sparse triple blip every 2 s
         PatternId.DEGRADED: PulsePattern(on_ms=50, off_ms=80, count=3, pause_ms=1690),
     }
