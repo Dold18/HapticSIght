@@ -2,8 +2,9 @@
 
 HapticSight is a wearable obstacle-awareness prototype: 4 ultrasonic sensors + 2 webcams →
 Python pipeline on a MacBook → 8 on/off ERM vibration motors via an Arduino Uno. This repo is the
-software: shared pipeline + simulator (Milestone 1) and dual-camera computer vision
-(Milestone 2, `hapticsight/vision/`). **Read [docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md) first**; it records what
+software: shared pipeline + simulator (Milestone 1), dual-camera computer vision
+(Milestone 2, `hapticsight/vision/`), and Arduino Uno firmware + serial runtime (Milestone 3,
+`firmware/arduino_uno/`, `hapticsight/hardware/`). **Read [docs/DEVELOPMENT_STATUS.md](docs/DEVELOPMENT_STATUS.md) first**; it records what
 is done, what is pending, and why.
 
 ## Commands
@@ -23,6 +24,10 @@ hapticsight-vision live --front 0 --rear 1 --ultrasonic "S0=90"
 hapticsight-vision live --front synthetic --rear synthetic --model synthetic   # no camera/model
 hapticsight-vision replay --front VIDEO --export out.jsonl                     # deterministic
 hapticsight-vision benchmark --system --front 0 --rear 1 --seconds 20
+make -C firmware/arduino_uno test                   # native firmware unit tests (ASan/UBSan)
+arduino-cli compile --fqbn arduino:avr:uno firmware/arduino_uno   # Uno build + memory report
+hapticsight-hw link-loss --port virtual             # host <-> virtual Uno (real firmware logic)
+hapticsight-hw run --port virtual --front off --rear off --headless --seconds 5
 ```
 
 All four checks (pytest, ruff check, ruff format --check, mypy) must pass before committing.
@@ -35,7 +40,11 @@ hapticsight/perception/  UltrasonicFrontEnd, RangeRateEstimator, ObservationBuff
 hapticsight/risk/        RiskEngine, Severity, Motion, RiskReport
 hapticsight/haptics/     motor mapping, PulsePattern table, HapticEncoder, PulseScheduler
 hapticsight/protocol/    serial protocol v1 codec, StreamDecoder, LinkMonitor
-hapticsight/hardware/    adapter Protocols, ArduinoBridge (host side, transport-agnostic)
+hapticsight/hardware/    ArduinoBridge (handshake/reconnect state machine), serial_transport (pyserial),
+                         virtual_arduino (fw_sim on a pty), inputs (REAL/SIMULATED sources),
+                         runtime (HardwareRuntime), telemetry (JSONL), cli (hapticsight-hw)
+firmware/arduino_uno/    Uno firmware: .ino = pin/ISR glue only; src/ = portable C++11 core;
+                         test/ = native tests + fw_sim (virtual Uno); Makefile
 hapticsight/pipeline.py  HapticSightPipeline, the ONE shared processing chain
 hapticsight/config.py    HapticSightConfig aggregate + TOML loader (config/example.toml)
 hapticsight/simulation/  world, simulated sensors, scenarios, engine (headless), cli, app (pygame),
@@ -79,6 +88,16 @@ models/, recordings/     git-ignored: model weights and local camera recordings 
 9. **Simulated ultrasonic data is labelled `SIMULATED`** everywhere (UI, logs, exports).
 10. **Privacy / repo size.** Never commit model files, camera recordings, or third-party video.
     Tests use fakes and synthetic video only; CI must not need a webcam or a model download.
+11. **Firmware.** `src/` stays hardware-independent C++11 (no Arduino headers, no `String`, no
+    heap, no STL) so it compiles natively for tests; only `arduino_uno.ino` touches pins/ISRs.
+    Keep the parser in lock-step with `hapticsight/protocol/codec.py` (parity tests enforce it)
+    and the built-in pattern table equal to `DEFAULT_PATTERNS`. Keep global SRAM <= 75 %.
+12. **Hardware honesty.** Pins in `hs_config.h` are PROVISIONAL; electrical parameters are
+    unverified. Never claim sensors/motors were tested unless they were physically measured.
+    Ultrasonic source kind (real / virtual / manual) comes from the source class, never from
+    user text; the host sends nothing to the Arduino before a valid `$HLO`.
+13. **Motor safety.** No command may drive motors by default; diagnostic motor output needs
+    explicit enablement, one motor at a time, with a short timeout.
 
 ## Conventions
 

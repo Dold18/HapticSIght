@@ -13,7 +13,18 @@ metadata at the time of writing; verify before redistribution.
 | numpy | vision arrays | BSD-3-Clause | |
 | opencv-python-headless | capture, image ops, video I/O, DNN | Apache-2.0 (OpenCV); wheels bundle FFmpeg (LGPL) and other libraries | headless build avoids bundling Qt |
 | onnxruntime | detector inference (CPU / CoreML) | MIT | |
+| pyserial | USB serial link to the Arduino | BSD-3-Clause | |
 | pytest, ruff, mypy | development only | MIT | |
+
+## Firmware toolchain and libraries
+
+| Component | Used for | Licence | Notes |
+|-----------|----------|---------|-------|
+| Arduino AVR core (`arduino:avr`) | `Serial`, `digitalWrite`, `shiftOut`, `millis`/`micros`, startup code linked into the firmware | LGPL-2.1 (core libraries) | the compiled firmware links against it; distributing binaries carries LGPL obligations (e.g. allowing relinking); source distribution of this repo is unaffected |
+| avr-gcc / avr-libc | compiler and C library | GPL (compiler; output not affected), avr-libc modified BSD | toolchain, not distributed |
+| arduino-cli | build/flash tool | GPL-3.0 | tool only, not distributed |
+
+The firmware uses no third-party Arduino libraries.
 
 ## Models (downloaded on request, never committed)
 

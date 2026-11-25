@@ -66,9 +66,9 @@ Sector boundaries belong to the **clockwise** neighbour (22.5° → M1, 337.5° 
 `PulseScheduler.output_byte()` already produces this byte (bit *k* = motor M*k*). Motors are
 switched **fully on or off** only; there is no PWM intensity control in this design.
 
-Still **TBD** by hardware: Arduino pin assignments for the 74HC595 (data/clock/latch, output
-enable), flyback/decoupling details, motor supply current budget, and whether `OE` is wired so
-firmware can force all motors off at boot.
+Arduino pins for the 74HC595 are **Proposed** in §3a. Still **TBD** by electronics: flyback and
+decoupling details, the motor supply and its current budget, and the confirmed `OE` pull-up
+(see [HARDWARE_BRINGUP.md](HARDWARE_BRINGUP.md) for the verification checklist).
 
 ## 3. Ultrasonic sensors (Agreed numbering)
 
@@ -90,8 +90,8 @@ re-measured on the real vest):
 | Beam half-angle | 15° | HC-SR04 nominal ~30° cone; real coverage depends on target size and material |
 | Valid range | 2–400 cm | outside → error / no echo |
 | Range uncertainty | ±2 cm | used conservatively by the risk engine |
-| Update rate | 10 Hz per sensor | assumes sequential firing to avoid cross-talk (**Proposed**) |
-| Stale after | 0.4 s | no reading for this long → sector coverage lost |
+| Update rate | **5 Hz per sensor** | firmware fires one sensor per 50 ms slot (4 × 50 ms cycle) to limit cross-talk; calculated, not yet measured on hardware |
+| Stale after | 0.6 s | no reading for this long → sector coverage lost |
 
 **Important limitation, by design:** four sensors give four *sectors* of range, not eight
 directions. The software never invents range for the diagonal directions. With the default
@@ -99,7 +99,46 @@ directions. The software never invents range for the diagonal directions. With t
 driven only when a camera supplies a bearing that is associated with an ultrasonic echo, when
 bearing uncertainty genuinely spans a diagonal sector, or in the simulator's ground-truth mode.
 
-Arduino pins for trigger/echo: **TBD** by hardware.
+Arduino pins for trigger/echo: **Proposed** in §3a.
+
+## 3a. Arduino Uno pin map (Proposed: needs CAD/electronics confirmation)
+
+Defined in one place: [`firmware/arduino_uno/src/hs_config.h`](../firmware/arduino_uno/src/hs_config.h).
+Target: **Arduino Uno R3 or a compatible ATmega328P board** (16 MHz, 5 V logic). The board
+revision still needs confirming. The *Uno R4* (Renesas RA4M1) is **not** compatible with the
+pin-change-interrupt glue in `arduino_uno.ino`; the portable core in `src/` would need a new
+hardware layer.
+
+| Pin | Function | Notes |
+|-----|----------|-------|
+| D0 / D1 | USB serial RX / TX | reserved: protocol link |
+| D2 / D3 | S0 TRIG / ECHO | echo D3 = PCINT19 (port D group) |
+| D4 / D5 | S1 TRIG / ECHO | echo D5 = PCINT21 |
+| D6 / D7 | S2 TRIG / ECHO | echo D7 = PCINT23 |
+| D8 / D9 | S3 TRIG / ECHO | echo D9 = PCINT1 (port B group) |
+| D10 | 74HC595 SER (pin 14) | bit-banged, not hardware SPI |
+| D11 | 74HC595 SRCLK (pin 11) | |
+| D12 | 74HC595 RCLK / latch (pin 12) | |
+| D13 | on-board LED: mode indicator | solid = HOST, 4 Hz blink = FALLBACK, 1 Hz = BOOT; also blinks during the bootloader, so it is deliberately **not** used for the shift register |
+| A0 (D14) | 74HC595 OE (pin 13), active low | **requires an external pull-up (e.g. 10 kΩ to 5 V)** |
+| A1–A5 | free | e.g. future battery-voltage sense |
+
+Why this mapping works on the Uno:
+
+* **Echo timing:** only one sensor is armed at a time, and its echo pin's pin-change interrupt
+  stamps both edges with `micros()` (4 µs resolution). D3/D5/D7 share the PCINT2 vector and D9
+  uses PCINT0; both call the same handler. No `pulseIn()`, so nothing blocks.
+* **Timers:** D3/D5/D6/D9 are PWM-capable but used as plain GPIO; `analogWrite` is never called,
+  so Timer0 (`millis()` / `micros()`) is unaffected.
+* **Echo inputs use the internal pull-up:** a disconnected echo wire reads HIGH, which the
+  firmware reports as a sensor error (`E`) instead of an occasional phantom reading.
+* **Boot behaviour:** during reset and the bootloader every pin is a high-impedance input, so
+  the firmware cannot control the 74HC595 then. With **OE pulled up externally** the register's
+  outputs stay disabled (and the ULN2803A inputs undriven) until `setup()` has shifted in `0x00`,
+  latched it, and only then driven OE low. Firmware alone cannot guarantee safe outputs during
+  reset. Also recommended for electronics review: SRCLR (pin 10) tied to 5 V; optional pull-downs
+  on the TRIG lines.
+* HC-SR04 TRIG lines float during reset; any spurious ping is harmless.
 
 ## 4. Cameras (mount bearings Agreed; optics unknown)
 
@@ -126,7 +165,7 @@ Arduino pins for trigger/echo: **TBD** by hardware.
 
 ## 5. Software / hardware boundary
 
-| Responsibility | MacBook (Python, this repo) | Arduino Uno (future firmware) |
+| Responsibility | MacBook (Python, this repo) | Arduino Uno (`firmware/arduino_uno`, implemented, not hardware-validated) |
 |----------------|-----------------------------|-------------------------------|
 | Fire HC-SR04s, measure echo time, convert to cm | — | ✔ |
 | Report ranges (`$US`) and status (`$ST`) | parse & validate | ✔ |

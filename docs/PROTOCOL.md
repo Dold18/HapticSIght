@@ -2,12 +2,14 @@
 
 Host (MacBook, Python) ⇄ Arduino Uno over USB serial.
 
-**Status:** the host side (encoding, decoding, validation, stream framing, link monitoring, and an
-`ArduinoBridge` over an abstract transport) is implemented and unit-tested in
-[`hapticsight/protocol/`](../hapticsight/protocol) and
-[`hapticsight/hardware/arduino.py`](../hapticsight/hardware/arduino.py).
-**The Arduino firmware is not implemented and nothing here has been validated on hardware.**
-Sections marked *Firmware requirement* are the specification the future firmware must meet.
+**Status (Milestone 3):** both sides are implemented.
+* Host: [`hapticsight/protocol/`](../hapticsight/protocol) (codec, framing, link monitor),
+  [`hapticsight/hardware/arduino.py`](../hapticsight/hardware/arduino.py) (connection state
+  machine) and [`serial_transport.py`](../hapticsight/hardware/serial_transport.py) (pyserial).
+* Firmware: [`firmware/arduino_uno/`](../firmware/arduino_uno) (see [FIRMWARE.md](FIRMWARE.md)).
+  It compiles for the Uno, and its protocol logic is tested natively and cross-checked against the
+  Python codec. **It has not yet run on a physical Arduino**, and nothing here is validated on
+  hardware. Sections marked *Firmware requirement* are implemented by that code.
 
 ## 1. Design goals
 
@@ -31,7 +33,7 @@ $<TYPE>,<field1>,<field2>,...*<CS>\n
 | End     | `\n` (a preceding `\r` is tolerated) |
 | Length  | ≤ 64 bytes including `\n` |
 
-Link settings (**Proposed**, unvalidated): 115200 baud, 8N1.
+Link settings: 115200 baud, 8N1 (implemented on both sides; not yet validated on hardware).
 
 ## 3. Messages: Arduino → host
 
@@ -43,6 +45,15 @@ $HLO,1,0.1.0*4B
 Sent once at boot. `firmware_version` is 1–12 chars of `[A-Za-z0-9._-]`. The host refuses to send
 motor commands if `protocol_version` ≠ 1, and re-sends the pattern table after every `HLO`
 (the board rebooted).
+
+**Handshake rules (host):** opening the USB serial port resets an Uno (DTR auto-reset), and the
+bootloader runs for roughly 0.5–2 s. Data sent during that window can delay the sketch, so the host
+**sends nothing until it has received a valid `$HLO`**. `$US`/`$ST` frames received before the
+handshake are discarded; they show the board is alive but do not prove compatibility. If no `$HLO`
+arrives within 3 s the host pulses DTR once to force a reset. It flushes its input *before* the
+pulse, so the fresh `$HLO` is never discarded. If that also fails the link is reported as
+`no_handshake` and retried later. A status clock that jumps backwards without an `$HLO` is treated
+as an unnoticed reset, and the pattern table is re-sent.
 
 ### `US`: ultrasonic ranges
 ```
@@ -57,6 +68,13 @@ $US,1203,845210,85,X,E,212*2D
 
 The host stamps readings with its own monotonic **receive** time. Values below the valid minimum
 (2 cm) are treated as errors and above the maximum (400 cm) as no echo.
+
+The firmware sends one `US` frame per complete S0→S3 cycle. Sensors are fired one at a time in
+50 ms slots, so each sensor updates at **5 Hz** (calculated from the slot timing; measured at
+4.9–5.1 Hz with the virtual Uno, **not yet measured on hardware**). `E` covers: echo never rose
+(sensor missing or unpowered), echo line already high before triggering (stuck or disconnected,
+since echo inputs use pull-ups), or a reading under 2 cm. `X` means an echo pulse longer than
+25 ms (nothing within about 430 cm).
 
 ### `ST`: status / heartbeat
 ```
@@ -124,11 +142,12 @@ These timings are provisional and need tuning with the real motors and wearer fe
 
 | Rule | Value |
 |------|-------|
-| Host sends `HAP` | at ≥ 10 Hz even when nothing changes (it doubles as the host heartbeat) |
+| Host sends `HAP` | immediately when the pattern string changes (≥ 20 ms apart), else every 100 ms as a heartbeat |
 | Host `HAP` TTL | 500 ms by default (tolerates 4 lost frames at 10 Hz) |
-| Arduino sends `US` | at the sensor update rate (proposed 10 Hz) |
-| Arduino sends `ST` | at least every 250 ms |
-| Host link timeout | 0.5 s without any valid message → link down (`LinkMonitor`) |
+| Arduino sends `US` | once per 4-sensor cycle: every 200 ms (5 Hz) with the default 50 ms slots |
+| Arduino sends `ST` | every 200 ms, and immediately on every mode change |
+| Host link timeout | 0.75 s without any valid message → link lost, reconnect (`ArduinoBridge`) |
+| Host ultrasonic staleness | a sensor without a reading for > 0.6 s is treated as lost coverage (DEGRADED cue) |
 
 When the host link is down the ultrasonic readings stop arriving, so the host pipeline marks every
 sensor STALE and the encoder requests the DEGRADED cue; it does not interpret silence as clear.
@@ -146,7 +165,13 @@ the same slot must not restart it. Pulse timing is generated from `millis()`.
    valid `HAP`), enter mode `F` immediately. Do not just switch the motors off: silence must not
    be read as "clear".
 4. **Fallback mode (ultrasonic-only):**
-   * Signal the mode change once: the DEGRADED pattern on all 8 motors for one cycle.
+   * Signal the mode change once: one burst of the DEGRADED pattern (≈ 310 ms with the default
+     timing) on all 8 motors, then start local warnings. The rest of that pattern's 2 s cycle is
+     silence, so the wait is not extended. All 8 motors starting at once may exceed the motor
+     supply's capacity (**not verified**); `HS_FB_CUE_ALL_MOTORS 0` limits the cue to
+     M0/M2/M4/M6.
+   * Local warnings use 350 ms release hysteresis (like the host) and treat readings older than
+     600 ms as missing.
    * Drive M0/M2/M4/M6 from S0/S1/S2/S3 with the default distance bands
      (< 50 cm CRITICAL, 50–99 WARNING, 100–200 CAUTION, else off) and slots 1–3.
    * A sensor that errors or times out drives its motor with DEGRADED.
@@ -154,6 +179,13 @@ the same slot must not restart it. Pulse timing is generated from `millis()`.
      been told the system is degraded.
    * Missing camera information is never treated as clear surroundings.
 5. **Recovery:** the first valid `HAP` returns the firmware to mode `H`.
+6. **Atomicity:** a line is fully parsed and validated before anything is applied; a rejected
+   line never partially changes motor commands or the pattern table, and it does not refresh the
+   command watchdog.
+7. **Boot without a host:** protocol v1 keeps mode `B` (motors off) until a host command arrives.
+   The firmware has a compile-time option `HS_BOOT_TO_FALLBACK_MS` (default off) to start local
+   ultrasonic warnings after a timeout instead. Enabling it is an open decision for the project
+   owner.
 
 ## 7. Line-length budget
 
@@ -181,5 +213,7 @@ All lines fit within the Uno's 64-byte receive buffer.
 | Encode / decode / validate | `protocol/codec.py` (`encode`, `decode`, `ProtocolError` hierarchy) |
 | Byte stream → lines, overflow resync | `protocol/link.py::StreamDecoder` |
 | Heartbeat timeout, dropped-frame count, firmware mode | `protocol/link.py::LinkMonitor` |
-| Readings in, haptic frames out, version check | `hardware/arduino.py::ArduinoBridge` |
-| Tests | `tests/test_protocol.py` (round trips, pinned wire examples, every rejection path) |
+| Readings in, haptic frames out, handshake, reconnection | `hardware/arduino.py::ArduinoBridge` |
+| Real serial port (pyserial), DTR reset | `hardware/serial_transport.py::PySerialTransport` |
+| Firmware parser / formatter | `firmware/arduino_uno/src/hs_protocol.{h,cpp}` |
+| Tests | `tests/test_protocol.py` (codec), `tests/test_arduino_bridge.py` (state machine), `tests/test_firmware_native.py` (C++ ↔ Python parity), `tests/test_hardware_integration.py` (host ↔ virtual Uno over a pty) |
