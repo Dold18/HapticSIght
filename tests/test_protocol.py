@@ -2,11 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from hapticsight.core.clock import ManualClock
-from hapticsight.core.models import RangeStatus
-from hapticsight.haptics.encoder import HapticEncoder
-from hapticsight.haptics.patterns import DEFAULT_PATTERNS
-from hapticsight.hardware.arduino import ArduinoBridge
 from hapticsight.protocol.codec import (
     ChecksumError,
     FieldError,
@@ -29,8 +24,6 @@ from hapticsight.protocol.messages import (
     StatusMessage,
     UltrasonicMessage,
 )
-from hapticsight.risk.engine import RiskEngine
-from tests.conftest import make_obs
 
 ROUND_TRIP = [
     HapticCommandMessage(seq=42, ttl_ms=500, patterns=(0, 3, 0, 0, 7, 0, 0, 1)),
@@ -167,69 +160,4 @@ def test_link_monitor_timeout_and_dropped_frames() -> None:
     assert link.firmware_mode is FirmwareMode.FALLBACK
 
 
-# ------------------------------------------------------------ arduino bridge
-
-
-class FakeTransport:
-    def __init__(self) -> None:
-        self.incoming = bytearray()
-        self.written: list[str] = []
-
-    def read_available(self) -> bytes:
-        data, self.incoming = bytes(self.incoming), bytearray()
-        return data
-
-    def write(self, data: bytes) -> None:
-        self.written.append(data.decode("ascii"))
-
-    def close(self) -> None:
-        pass
-
-
-def test_bridge_sends_pattern_table_and_converts_ranges() -> None:
-    t, clock = FakeTransport(), ManualClock(10.0)
-    bridge = ArduinoBridge(t, clock)
-    bridge.start()
-    pats = [decode(line) for line in t.written]
-    assert len(pats) == len(DEFAULT_PATTERNS) - 1  # slot 0 is fixed in firmware
-    assert all(isinstance(p, PatternDefinitionMessage) for p in pats)
-
-    t.incoming += encode(
-        UltrasonicMessage(1, 999, (85, RangeCode.NO_ECHO, RangeCode.ERROR, 300))
-    ).encode()
-    t.incoming += b"$US,broken*00\n"
-    readings = bridge.poll()
-    assert [(r.sensor_id, r.status, r.distance_cm) for r in readings] == [
-        ("S0", RangeStatus.VALID, 85.0),
-        ("S1", RangeStatus.NO_ECHO, None),
-        ("S2", RangeStatus.INVALID, None),
-        ("S3", RangeStatus.VALID, 300.0),
-    ]
-    assert all(r.timestamp == 10.0 for r in readings)  # host receive time
-    assert bridge.link.decode_errors == 1
-    assert bridge.link.is_alive(10.4)
-
-
-def test_bridge_sends_haptic_frames_with_incrementing_seq() -> None:
-    t, clock = FakeTransport(), ManualClock()
-    bridge = ArduinoBridge(t, clock)
-    frame_ = HapticEncoder().encode(RiskEngine().assess([make_obs(90, 30)], 0), 0)
-    bridge.send(frame_)
-    bridge.send(frame_)
-    msgs = [decode(line) for line in t.written]
-    assert [m.seq for m in msgs] == [0, 1]  # type: ignore[union-attr]
-    assert msgs[0] == HapticCommandMessage(0, 500, (0, 0, 3, 0, 0, 0, 0, 0))
-
-
-def test_bridge_refuses_incompatible_firmware_and_resyncs_on_reboot() -> None:
-    t, clock = FakeTransport(), ManualClock()
-    bridge = ArduinoBridge(t, clock)
-    t.incoming += encode(HelloMessage(2, "future")).encode()
-    bridge.poll()
-    assert bridge.incompatible
-    bridge.send(HapticEncoder().encode(RiskEngine().assess([], 0), 0))
-    assert t.written == []
-    t.incoming += encode(HelloMessage(1, "fw1")).encode()
-    bridge.poll()
-    assert not bridge.incompatible
-    assert len(t.written) == len(DEFAULT_PATTERNS) - 1  # table re-sent after reboot
+# Arduino bridge (connection state machine) tests live in tests/test_arduino_bridge.py.
