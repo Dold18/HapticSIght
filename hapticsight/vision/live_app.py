@@ -410,8 +410,8 @@ class LiveVisionApp:
         mount = format_bearing(proc.geometry.mount_bearing_deg)
         device = proc.camera.device
         source = camera_source_label(device)
-        name = self.text(f"{sel}{cid} ({mount}) {source}", (x, y - 24), TEXT, self.bold)
-        self.text(st.state.value.upper(), (name.right + 10, y - 24), STATE_COLORS[st.state],
+        name = self.text(f"{sel}{cid} ({mount}) {source}", (x, y - 28), TEXT, self.bold)
+        self.text(st.state.value.upper(), (name.right + 10, y - 28), STATE_COLORS[st.state],
                   self.bold)  # fmt: skip
         perf_txt = (
             f"cap {st.fps:4.1f} fps | infer {perf.inference_fps:4.1f} fps "
@@ -419,7 +419,7 @@ class LiveVisionApp:
             if perf and perf.processed_frames
             else "no inference yet"
         )
-        self.text(perf_txt, (x + CAM_W, y - 21), DIM, self.small, "topright")
+        self.text(perf_txt, (x + CAM_W, y - 13), DIM, self.small, "topright")
         rect = pygame.Rect(x, y, CAM_W, CAM_H)
         pygame.draw.rect(self.screen, PANEL, rect)
         frame = snap.frames.get(cid)
@@ -565,11 +565,11 @@ class LiveVisionApp:
 
     def _draw_middle(self, x: int, y: int) -> None:
         color = self._source_color()
-        title = self.ultrasonic.title()
-        self.text(title[:46], (x, y), color, self.bold)
-        if len(title) > 46:
-            self.text(title[46:92], (x, y + 16), color, self.small)
-            y += 12
+        head, _, detail = self.ultrasonic.title().partition(" (")
+        self.text(head, (x, y), color, self.bold)
+        if detail:
+            self.text(detail.rstrip(")")[:60], (x, y + 17), color, self.small)
+            y += 14
         y += 20
         st = self.ultrasonic.bridge_status()
         if st is not None:
