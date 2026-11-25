@@ -208,3 +208,11 @@ def test_fusion_uses_oldest_timestamp() -> None:
 def test_fusion_disabled_passes_through() -> None:
     out = fuse([us("S0", 0, 80)], [cam("c1", 0)], FusionConfig(enabled=False))
     assert {o.source for o in out} == {SourceType.ULTRASONIC, SourceType.CAMERA}
+
+
+def test_fusion_ignores_stale_echo_when_now_given() -> None:
+    stale_echo = us("S0", 0, 80, t=0.0)
+    out = fuse([stale_echo], [cam("c1", 0, t=1.0)], now=1.0)
+    # Camera stays bearing-only; the stale echo is passed through untouched.
+    assert {o.source for o in out} == {SourceType.ULTRASONIC, SourceType.CAMERA}
+    assert next(o for o in out if o.source is SourceType.CAMERA).distance_cm is None

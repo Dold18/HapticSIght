@@ -57,6 +57,7 @@ class HapticSightPipeline:
             self.ultrasonic.observations(),
             self.camera_buffer.current(now),
             self.config.fusion,
+            now,
         )
         return self.process_observations(now, observations, self.ultrasonic.health(now))
 

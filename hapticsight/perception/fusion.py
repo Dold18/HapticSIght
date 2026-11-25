@@ -34,19 +34,31 @@ from hapticsight.core.models import Observation, RangeStatus, SourceType
 class FusionConfig:
     enabled: bool = True
     association_margin_deg: float = 10.0
+    max_ultrasonic_age_s: float = 0.4
 
 
 def fuse(
     ultrasonic: Sequence[Observation],
     camera: Sequence[Observation],
     config: FusionConfig | None = None,
+    now: float | None = None,
 ) -> list[Observation]:
-    """Return the combined observation list (fused + unmatched raw)."""
+    """Return the combined observation list (fused + unmatched raw).
+
+    When ``now`` is given, ultrasonic echoes older than ``max_ultrasonic_age_s``
+    are not used for association: a stale range must not be attached to a fresh
+    camera detection. Stale echoes are still passed through unchanged so the
+    risk engine can report them as stale.
+    """
     cfg = config or FusionConfig()
     if not cfg.enabled:
         return [*ultrasonic, *camera]
 
-    ranged_us = [u for u in ultrasonic if u.has_range]
+    ranged_us = [
+        u
+        for u in ultrasonic
+        if u.has_range and (now is None or u.age(now) <= cfg.max_ultrasonic_age_s)
+    ]
     matches: dict[str, list[Observation]] = {u.id: [] for u in ranged_us}
     unmatched_camera: list[Observation] = []
     best_for_cam: dict[str, Observation] = {}
