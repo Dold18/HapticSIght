@@ -508,9 +508,10 @@ class SimulatorApp:
             pygame.draw.circle(self.screen, FAINT, p, r, 1)
             return
         if on:
-            glow = pygame.Surface((r * 6, r * 6), pygame.SRCALPHA)
-            pygame.draw.circle(glow, (*color, 70), (r * 3, r * 3), r * 3)
-            self.screen.blit(glow, (p[0] - r * 3, p[1] - r * 3))
+            g = round(r * 1.9)
+            glow = pygame.Surface((g * 2, g * 2), pygame.SRCALPHA)
+            pygame.draw.circle(glow, (*color, 80), (g, g), g)
+            self.screen.blit(glow, (p[0] - g, p[1] - g))
             pygame.draw.circle(self.screen, color, p, r)
             pygame.draw.circle(self.screen, (255, 255, 255), p, r, 1)
         else:
