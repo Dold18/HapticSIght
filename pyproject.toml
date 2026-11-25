@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hapticsight"
+version = "0.1.0"
+description = "Wearable computer-vision and haptic obstacle-awareness prototype: shared perception, risk, and haptic logic plus an interactive simulator."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Jacob Dold" }]
+dependencies = []
+
+[project.optional-dependencies]
+# The interactive simulator is the only component that needs a graphics library.
+sim = ["pygame-ce>=2.4"]
+dev = ["pygame-ce>=2.4", "pytest>=8", "ruff>=0.6", "mypy>=1.10"]
+
+[project.scripts]
+hapticsight-sim = "hapticsight.simulation.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["hapticsight*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["RUF001", "RUF002", "RUF003"]  # allow unicode such as "°" in strings/comments
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["hapticsight"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["pygame", "pygame.*"]
+ignore_missing_imports = true
