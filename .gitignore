@@ -23,3 +23,20 @@ htmlcov/
 
 # Local Claude Code settings
 .claude/settings.local.json
+
+# Milestone 2: computer vision artifacts (never commit these)
+models/
+*.onnx
+*.mlmodel
+*.mlpackage/
+recordings/
+*.mp4
+*.avi
+*.mov
+*.jsonl
+benchmarks/local/
+
+# Machine-specific configuration (camera indices, calibration of this machine)
+config/local*.toml
+config/cameras.local.toml
+.env
