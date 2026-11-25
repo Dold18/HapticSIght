@@ -9,10 +9,10 @@ beam_half_angle_deg = 15.0      # HC-SR04 nominal cone; reality varies with targ
 min_range_cm = 2.0
 max_range_cm = 400.0
 distance_uncertainty_cm = 2.0
-stale_after_s = 0.4             # no reading for this long -> sector coverage lost
+stale_after_s = 0.6             # no reading for this long -> sector coverage lost (5 Hz firmware)
 
 [range_rate]
-window_s = 0.6
+window_s = 1.0
 min_samples = 4
 
 [fusion]
@@ -25,7 +25,7 @@ ttc_critical_s = 1.0
 ttc_warning_s = 2.0
 ttc_caution_s = 3.0
 min_confidence = 0.35
-stale_after_s = 0.5
+stale_after_s = 0.6
 expire_after_s = 2.0
 forward_path_half_angle_deg = 30.0
 

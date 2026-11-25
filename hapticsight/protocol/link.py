@@ -66,7 +66,7 @@ class LinkMonitor:
     *valid* message. Times are host monotonic seconds.
     """
 
-    def __init__(self, timeout_s: float = 0.5) -> None:
+    def __init__(self, timeout_s: float = 0.75) -> None:
         self.timeout_s = timeout_s
         self.last_rx: float | None = None
         self.firmware_mode: FirmwareMode | None = None

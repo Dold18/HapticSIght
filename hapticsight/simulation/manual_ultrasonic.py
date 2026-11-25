@@ -40,7 +40,7 @@ class ManualSensor:
 
 @dataclass
 class ManualUltrasonic:
-    rate_hz: float = 10.0
+    rate_hz: float = 5.0  # same cadence as the real firmware
     sensors: dict[str, ManualSensor] = field(
         default_factory=lambda: {s.sensor_id: ManualSensor(s.sensor_id) for s in ULTRASONIC_SENSORS}
     )

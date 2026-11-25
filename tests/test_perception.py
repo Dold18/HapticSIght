@@ -25,8 +25,9 @@ def feed(est: RangeRateEstimator, samples: list[tuple[float, float]]) -> float |
 
 def test_closing_speed_unknown_until_enough_samples() -> None:
     est = RangeRateEstimator(RangeRateConfig(min_samples=4))
-    assert feed(est, [(0.0, 200), (0.1, 195), (0.2, 190)]) is None
-    assert est.update("k", 0.3, 185) == pytest.approx(50)
+    # 5 Hz, the firmware's per-sensor rate
+    assert feed(est, [(0.0, 200), (0.2, 190), (0.4, 180)]) is None
+    assert est.update("k", 0.6, 170) == pytest.approx(50)
 
 
 def test_closing_speed_sign_convention() -> None:

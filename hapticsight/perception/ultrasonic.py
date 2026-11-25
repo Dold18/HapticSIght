@@ -36,14 +36,16 @@ class UltrasonicConfig:
     max_range_cm: float = 400.0
     distance_uncertainty_cm: float = 2.0
     confidence: float = 0.9
-    stale_after_s: float = 0.4
+    # Firmware reports each sensor at 5 Hz (one US frame per 200 ms cycle); stale
+    # after 3 periods without a reading, i.e. two consecutive frames lost.
+    stale_after_s: float = 0.6
 
 
 @dataclass(frozen=True, slots=True)
 class RangeRateConfig:
-    window_s: float = 0.6
+    window_s: float = 1.0  # ~5 samples at the firmware's 5 Hz per sensor
     min_samples: int = 4
-    min_span_s: float = 0.2
+    min_span_s: float = 0.4
     # A jump implying a faster change than this is treated as a different
     # object entering the beam, so the history restarts.
     max_plausible_rate_cm_s: float = 400.0

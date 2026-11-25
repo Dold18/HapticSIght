@@ -40,7 +40,7 @@ class SensorMode(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class SimSensorConfig:
-    ultrasonic_rate_hz: float = 10.0
+    ultrasonic_rate_hz: float = 5.0  # matches the firmware's staggered 4 x 50 ms cycle
     ultrasonic_noise_cm: float = 1.0
     camera_rate_hz: float = 15.0
     camera_hfov_deg: float = 60.0
